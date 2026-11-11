@@ -35,6 +35,7 @@ internal object ChatGptPlanClient {
     private const val PREFS = "milo_data"
     private const val CREDENTIALS = "chatgpt_credentials_v1"
     private const val HOST_ID = "chatgpt_host_id"
+    private const val PENDING_CLIENT_ID = "chatgpt_pending_client_id"
     private const val KEY_ALIAS = "milo_chatgpt_credentials"
     private const val RESOURCE = "https://api.openai.com/v1"
     private const val ISSUER = "https://auth.openai.com"
@@ -59,9 +60,12 @@ internal object ChatGptPlanClient {
             Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
         )
         ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { listener ->
-            listener.soTimeout = 180_000
+            listener.soTimeout = 600_000
             val redirect = "http://127.0.0.1:${listener.localPort}/auth/callback"
-            val issuedClientId = readCredentials(activity)?.optString("client_id").orEmpty()
+            val existingAccount = readCredentials(activity)
+            val issuedClientId = existingAccount?.optString("client_id").orEmpty().ifBlank {
+                prefs.getString(PENDING_CLIENT_ID, "").orEmpty()
+            }
             val query = linkedMapOf(
                 "client_id" to if (issuedClientId.isBlank()) "dynamic_agent_client" else issuedClientId,
                 "redirect_uri" to redirect,
@@ -89,6 +93,7 @@ internal object ChatGptPlanClient {
             while (reader.readLine().orEmpty().isNotEmpty()) { }
             val target = requestLine.split(' ').getOrNull(1).orEmpty()
             val returned = Uri.parse("http://127.0.0.1$target")
+            check(returned.path == "/auth/callback") { "Nieprawidłowy adres powrotu z logowania." }
             val response = if (returned.getQueryParameter("state") == state) {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body style='font-family:sans-serif'><h2>Milo połączony z ChatGPT</h2><p>Możesz wrócić do aplikacji.</p></body></html>"
             } else {
@@ -104,23 +109,30 @@ internal object ChatGptPlanClient {
             val clientId = callbackClient ?: issuedClientId
             check(clientId.isNotBlank() && clientId != "dynamic_agent_client") { "OpenAI nie zakończyło rejestracji aplikacji." }
             if (issuedClientId.isNotBlank()) check(clientId == issuedClientId) { "Rejestracja ChatGPT jest inna niż aktywne konto." }
+            prefs.edit().putString(PENDING_CLIENT_ID, clientId).apply()
 
             val token = postForm("https://auth.openai.com/api/accounts/oauth/token", linkedMapOf(
                 "grant_type" to "authorization_code", "client_id" to clientId,
                 "code" to code, "code_verifier" to verifier, "redirect_uri" to redirect, "resource" to RESOURCE
             ))
-            val scopes = token.optString("scope").split(' ').toSet()
+            val grantedScopes = token.optString("scope").ifBlank { returned.getQueryParameter("scope").orEmpty() }
+            val scopes = grantedScopes.split(' ').filter { it.isNotBlank() }.toSet()
             check("chatgpt.tokens.use.direct" in scopes) { "Nie przyznano Milo dostępu do użycia planu ChatGPT." }
             val idToken = token.getString("id_token")
             val claims = validateIdToken(idToken, clientId, nonce)
+            val previousSubject = existingAccount?.optString("sub").orEmpty()
+            if (previousSubject.isNotBlank()) check(claims.optString("sub") == previousSubject) {
+                "Zalogowano inne konto ChatGPT niż zapisane połączenie Milo. Odłącz stare konto i połącz je ponownie."
+            }
             val email = claims.optString("email").ifBlank { "konto ChatGPT" }
             val account = JSONObject().apply {
                 put("client_id", clientId); put("email", email); put("sub", claims.getString("sub"))
                 put("id_token", idToken); put("access_token", token.getString("access_token"))
-                put("refresh_token", token.optString("refresh_token")); put("scope", token.optString("scope"))
+                put("refresh_token", token.optString("refresh_token")); put("scope", grantedScopes)
                 put("expires_at", System.currentTimeMillis() + token.optLong("expires_in", 3600) * 1000L)
             }
             writeCredentials(activity, account)
+            prefs.edit().remove(PENDING_CLIENT_ID).apply()
             val model = chooseModel(activity, account.getString("access_token"))
             account.put("model", model)
             writeCredentials(activity, account)
@@ -136,7 +148,7 @@ internal object ChatGptPlanClient {
                 "token" to refresh, "token_type_hint" to "refresh_token", "client_id" to record.getString("client_id")
             ))
         } catch (_: Exception) { }
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(CREDENTIALS).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(CREDENTIALS).remove(PENDING_CLIENT_ID).apply()
     }
 
     suspend fun reply(context: Context, history: List<ChatMessage>, current: String, imageBase64: String?, memory: String, webSearch: Boolean): String = withContext(Dispatchers.IO) {

@@ -61,6 +61,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -151,11 +154,11 @@ private class MiloVoiceController(
                 languageStatus != TextToSpeech.LANG_NOT_SUPPORTED
             engine.voices
                 ?.filter { it.locale.language == "pl" }
-                ?.maxWithOrNull(compareBy<Voice> { if (it.quality >= Voice.QUALITY_HIGH) 1 else 0 }
-                    .thenBy { if (!it.isNetworkConnectionRequired) 1 else 0 })
+                ?.maxWithOrNull(compareBy<Voice> { it.quality }
+                    .thenBy { if (it.isNetworkConnectionRequired) 1 else 0 })
                 ?.let(engine::setVoice)
-            engine.setPitch(.94f)
-            engine.setSpeechRate(.91f)
+            engine.setPitch(.98f)
+            engine.setSpeechRate(.98f)
             ttsReady = polishAvailable
             ttsInitializationFinished = true
             mainHandler.post {
@@ -279,6 +282,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        hideSystemBars()
         unknownSourcesLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             if (packageManager.canRequestPackageInstalls()) installPendingUpdate()
         }
@@ -288,7 +293,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        hideSystemBars()
         if (!installLaunched && pendingUpdate != null && packageManager.canRequestPackageInstalls()) installPendingUpdate()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
+    }
+
+    private fun hideSystemBars() {
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
     }
 
     private fun checkForPrivateUpdate() {
@@ -408,6 +426,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     val context = LocalContext.current
@@ -424,6 +443,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     var draft by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var cameraOpen by remember { mutableStateOf(false) }
+    var chatOpen by remember { mutableStateOf(false) }
     var cameraAllowed by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
     var photoBase64 by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -509,175 +529,101 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     }
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Teal, background = Cream, surface = Color.White, onSurface = Ink)) {
-        Column(Modifier.fillMaxSize().background(Cream).imePadding()) {
-            Row(
-                Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 20.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                FriendlyRobotFace(
-                    Modifier.size(58.dp),
-                    mood = when {
-                        busy -> RobotMood.THINKING
-                        voiceSpeaking -> RobotMood.SPEAKING
-                        voiceListening -> RobotMood.LISTENING
-                        cameraOpen || photoBase64 != null -> RobotMood.CURIOUS
-                        else -> RobotMood.FRIENDLY
+        Box(Modifier.fillMaxSize().background(Cream)) {
+            Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Milo", fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Ink)
+                        Text(if (chatGptAccount != null) "Twój przyjazny robot · gotowy" else "Twój przyjazny robot", fontSize = 13.sp, color = Color(0xFF698087))
                     }
-                )
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("Milo", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Ink)
-                    Text("Twój przyjazny robot AI", fontSize = 13.sp, color = Color(0xFF698087))
+                    TextButton(onClick = {
+                        chatGptAccount = ChatGptPlanClient.currentAccount(context)
+                        settingsDialog = true
+                    }) { Text("⚙️", fontSize = 21.sp) }
                 }
-                TextButton(onClick = {
-                    val transcript = messages.joinToString("\n\n") { message ->
-                        "${if (message.role == "user") "Ty" else "Milo"}: ${message.text}"
+                updateMessage?.let { status ->
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(SoftMint).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(status, color = Ink, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        if (status.startsWith("Dostępna")) TextButton(onClick = onInstallUpdate) { Text("Aktualizuj") }
                     }
-                    val share = Intent(Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_SUBJECT, "Rozmowa z Milo")
-                        putExtra(Intent.EXTRA_TEXT, transcript)
-                    }
-                    context.startActivity(Intent.createChooser(share, "Przekaż rozmowę do aplikacji czatu"))
-                }) { Text("📤", fontSize = 19.sp) }
-                TextButton(onClick = {
-                    voiceEnabled = !voiceEnabled
-                    context.getSharedPreferences(PREFS, 0).edit().putBoolean(VOICE_ENABLED_KEY, voiceEnabled).apply()
-                    if (!voiceEnabled) {
-                        voiceController?.stopSpeaking()
-                        voiceController?.resumeAfterResponse()
-                    }
-                }) { Text(if (voiceEnabled) "🔊" else "🔇", fontSize = 18.sp) }
-                TextButton(onClick = { memoryDialog = true }) { Text("🧠", fontSize = 19.sp) }
-                TextButton(onClick = {
-                    chatGptAccount = ChatGptPlanClient.currentAccount(context)
-                    settingsDialog = true
-                }) { Text("⚙️", fontSize = 19.sp) }
-                Box(Modifier.size(9.dp).clip(CircleShape).background(if (chatGptAccount != null) Teal else Color(0xFFDA9D45)))
-                Spacer(Modifier.width(6.dp))
-                Text(if (chatGptAccount != null) "gotowy" else "zaloguj", fontSize = 12.sp, color = Color(0xFF698087))
-            }
-
-            updateMessage?.let { status ->
-                Row(Modifier.fillMaxWidth().background(SoftMint).padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(status, color = Ink, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                    if (status.startsWith("Dostępna")) Button(onClick = onInstallUpdate) { Text("Aktualizuj") }
                 }
-            }
-
-            if (cameraOpen) {
-                CameraPanel(
-                    memory = memories.joinToString("\n"),
-                    onCapture = { encoded ->
-                        photoBase64 = encoded
-                        cameraOpen = false
-                        notice = "Zdjęcie gotowe. Napisz, co mam na nim sprawdzić."
-                    },
-                    onClose = { cameraOpen = false },
-                    onError = { notice = it }
-                )
-            }
-
-            LazyColumn(
-                Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
-                state = listState,
-                contentPadding = PaddingValues(top = 18.dp, bottom = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(messages) { message ->
-                    val fromMilo = message.role == "assistant"
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (fromMilo) Arrangement.Start else Arrangement.End, verticalAlignment = Alignment.Bottom) {
-                        if (fromMilo) {
+                if (cameraOpen) {
+                    CameraPanel(
+                        memory = memories.joinToString("\n"),
+                        liveConversation = liveConversation,
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        onCapture = { encoded -> photoBase64 = encoded; cameraOpen = false; chatOpen = true; notice = "Zdjęcie gotowe. Napisz, co mam na nim sprawdzić." },
+                        onClose = { cameraOpen = false },
+                        onError = { notice = it }
+                    )
+                } else {
+                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             FriendlyRobotFace(
-                                Modifier.size(30.dp),
-                                mood = when {
-                                    busy -> RobotMood.THINKING
-                                    voiceSpeaking -> RobotMood.SPEAKING
-                                    else -> RobotMood.FRIENDLY
-                                }
+                                Modifier.fillMaxWidth(.92f).aspectRatio(1f),
+                                mood = when { busy -> RobotMood.THINKING; voiceSpeaking -> RobotMood.SPEAKING; voiceListening -> RobotMood.LISTENING; else -> RobotMood.FRIENDLY }
                             )
-                            Spacer(Modifier.width(7.dp))
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                when { busy -> "Milo myśli…"; voiceSpeaking -> "Milo mówi"; liveConversation && voiceListening -> "Milo słucha"; liveConversation -> "Rozmowa na żywo"; else -> "Cześć! Jestem Milo." },
+                                color = Teal, fontSize = 15.sp, fontWeight = FontWeight.Medium
+                            )
+                            if (notice != null) Text(notice.orEmpty(), color = Color(0xFF698087), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp), maxLines = 2)
+                            if (photoBase64 != null) Text("📷 Zdjęcie czeka w czacie", color = Teal, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
                         }
-                        Text(
-                            text = message.text,
-                            modifier = Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(18.dp, 18.dp, if (fromMilo) 18.dp else 4.dp, if (fromMilo) 4.dp else 18.dp))
-                                .background(if (fromMilo) Color.White else SoftMint).padding(horizontal = 15.dp, vertical = 12.dp),
-                            color = Ink, fontSize = 15.sp, lineHeight = 21.sp
-                        )
                     }
                 }
-                if (busy) item { Text("Milo zastanawia się…", color = Color(0xFF698087), modifier = Modifier.padding(start = 38.dp)) }
-            }
-
-            notice?.let { note ->
-                Text(note, color = Color(0xFF526C71), fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 5.dp))
-            }
-            if (photoBase64 != null) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("📷 Zdjęcie dołączone", color = Teal, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                    TextButton(onClick = { photoBase64 = null; notice = "Usunięto zdjęcie z wiadomości." }) { Text("Usuń") }
+                Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                    FilledTonalButton(onClick = { chatOpen = true }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(50.dp)) { Text("💬", fontSize = 21.sp) }
+                    FilledTonalButton(onClick = { notice = null; if (cameraAllowed) cameraOpen = true else permission.launch(Manifest.permission.CAMERA) }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(50.dp)) { Text("📷", fontSize = 20.sp) }
+                    FilledTonalButton(
+                        onClick = {
+                            if (liveConversation) { voiceController?.stopLiveConversation(); liveConversation = false; notice = "Zakończono rozmowę na żywo." }
+                            else if (chatGptAccount == null) { notice = "Najpierw połącz Milo z ChatGPT w ustawieniach."; settingsDialog = true }
+                            else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                liveConversation = voiceController?.startLiveConversation() == true
+                                notice = if (liveConversation) "Rozmowa na żywo włączona." else "Nie udało się uruchomić rozmowy głosowej."
+                            } else microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+                        },
+                        enabled = !busy || liveConversation, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(54.dp),
+                        colors = if (liveConversation) ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFFF7D9D3)) else ButtonDefaults.filledTonalButtonColors()
+                    ) { Text(if (liveConversation) "⏹" else "🎙️", fontSize = 22.sp) }
+                    FilledTonalButton(onClick = { voiceEnabled = !voiceEnabled; context.getSharedPreferences(PREFS, 0).edit().putBoolean(VOICE_ENABLED_KEY, voiceEnabled).apply(); if (!voiceEnabled) { voiceController?.stopSpeaking(); voiceController?.resumeAfterResponse() } }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(50.dp)) { Text(if (voiceEnabled) "🔊" else "🔇", fontSize = 19.sp) }
+                    FilledTonalButton(onClick = { memoryDialog = true }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(50.dp)) { Text("🧠", fontSize = 20.sp) }
                 }
             }
-            if (liveConversation) {
-                Text(
-                    when {
-                        busy -> "Milo układa odpowiedź…"
-                        voiceSpeaking -> "Milo mówi…"
-                        voiceListening -> "Milo słucha…"
-                        else -> "Rozmowa na żywo aktywna"
-                    },
-                    color = Teal,
-                    fontSize = 12.sp,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp)
-                )
-            }
-            Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                FilledTonalButton(
-                    onClick = {
-                        notice = null
-                        if (cameraAllowed) cameraOpen = true else permission.launch(Manifest.permission.CAMERA)
-                    },
-                    shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(48.dp)
-                ) { Text("📷", fontSize = 20.sp) }
-                Spacer(Modifier.width(8.dp))
-                FilledTonalButton(
-                    onClick = {
-                        if (liveConversation) {
-                            voiceController?.stopLiveConversation()
-                            liveConversation = false
-                            notice = "Zakończono rozmowę na żywo."
-                        } else if (chatGptAccount == null) {
-                            notice = "Najpierw połącz Milo z ChatGPT w ustawieniach."
-                        } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                            liveConversation = voiceController?.startLiveConversation() == true
-                            notice = if (liveConversation) "Rozmowa na żywo włączona. Android rozpoznaje mowę; Milo wysyła do ChatGPT rozpoznany tekst. Milo będzie słuchał, odpowiadał i znów słuchał." else "Nie udało się uruchomić rozmowy głosowej."
-                        } else {
-                            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
-                        }
-                    },
-                    enabled = !busy || liveConversation,
-                    shape = CircleShape,
-                    contentPadding = PaddingValues(0.dp),
-                    modifier = Modifier.size(48.dp),
-                    colors = if (liveConversation) ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFFF7D9D3)) else ButtonDefaults.filledTonalButtonColors()
-                ) { Text(if (liveConversation) "⏹" else "🎙️", fontSize = 19.sp) }
-                Spacer(Modifier.width(8.dp))
-                BasicTextField(
-                    value = draft,
-                    onValueChange = { draft = it },
-                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(24.dp)).background(Color.White).padding(horizontal = 16.dp, vertical = 14.dp),
-                    textStyle = TextStyle(color = Ink, fontSize = 15.sp),
-                    decorationBox = { inner ->
-                        if (draft.isEmpty()) Text("Napisz do Milo…", color = Color(0xFF92A3A5), fontSize = 15.sp)
-                        inner()
+        }
+        if (chatOpen) {
+            ModalBottomSheet(onDismissRequest = { chatOpen = false }, containerColor = Cream, dragHandle = { BottomSheetDefaults.DragHandle() }) {
+                Column(Modifier.fillMaxWidth().fillMaxHeight(.82f).imePadding().padding(horizontal = 16.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Rozmowa z Milo", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Ink, modifier = Modifier.weight(1f))
+                        TextButton(onClick = {
+                            val transcript = messages.joinToString("\n\n") { "${if (it.role == "user") "Ty" else "Milo"}: ${it.text}" }
+                            val share = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_SUBJECT, "Rozmowa z Milo"); putExtra(Intent.EXTRA_TEXT, transcript) }
+                            context.startActivity(Intent.createChooser(share, "Przekaż rozmowę do aplikacji czatu"))
+                        }) { Text("Udostępnij") }
                     }
-                )
-                Spacer(Modifier.width(8.dp))
-                Button(
-                    enabled = draft.isNotBlank() && !busy,
-                    onClick = { submitMessage(draft) },
-                    shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(48.dp)
-                ) { Text("➤", fontSize = 18.sp) }
+                    LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, contentPadding = PaddingValues(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(messages) { message ->
+                            val fromMilo = message.role == "assistant"
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = if (fromMilo) Arrangement.Start else Arrangement.End, verticalAlignment = Alignment.Bottom) {
+                                if (fromMilo) { FriendlyRobotFace(Modifier.size(30.dp), mood = if (busy) RobotMood.THINKING else RobotMood.FRIENDLY); Spacer(Modifier.width(7.dp)) }
+                                Text(message.text, modifier = Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(18.dp, 18.dp, if (fromMilo) 18.dp else 4.dp, if (fromMilo) 4.dp else 18.dp)).background(if (fromMilo) Color.White else SoftMint).padding(horizontal = 15.dp, vertical = 12.dp), color = Ink, fontSize = 15.sp, lineHeight = 21.sp)
+                            }
+                        }
+                        if (busy) item { Text("Milo zastanawia się…", color = Color(0xFF698087)) }
+                    }
+                    if (photoBase64 != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("📷 Zdjęcie dołączone", color = Teal, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { photoBase64 = null }) { Text("Usuń") }
+                    }
+                    Row(Modifier.fillMaxWidth().padding(bottom = 12.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        BasicTextField(value = draft, onValueChange = { draft = it }, modifier = Modifier.weight(1f).clip(RoundedCornerShape(24.dp)).background(Color.White).padding(horizontal = 16.dp, vertical = 14.dp), textStyle = TextStyle(color = Ink, fontSize = 15.sp), decorationBox = { inner -> if (draft.isEmpty()) Text("Napisz do Milo…", color = Color(0xFF92A3A5), fontSize = 15.sp); inner() })
+                        Spacer(Modifier.width(8.dp))
+                        Button(enabled = draft.isNotBlank() && !busy, onClick = { submitMessage(draft) }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(48.dp)) { Text("➤", fontSize = 18.sp) }
+                    }
+                }
             }
         }
     }
@@ -714,6 +660,10 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                         fontSize = 14.sp
                     )
                     if (connecting) Text("Oczekiwanie na logowanie w przeglądarce…", color = Teal)
+                    TextButton(onClick = {
+                        try { context.startActivity(Intent("com.android.settings.TTS_SETTINGS")) }
+                        catch (_: Exception) { notice = "Otwórz w ustawieniach Androida: Synteza mowy / Głos." }
+                    }) { Text("Wybierz głos Androida") }
                 }
             },
             confirmButton = {
@@ -853,17 +803,21 @@ private fun FriendlyRobotFace(modifier: Modifier = Modifier, mood: RobotMood = R
 @Composable
 private fun CameraPanel(
     memory: String,
+    liveConversation: Boolean,
+    modifier: Modifier = Modifier,
     onCapture: (String) -> Unit,
     onClose: () -> Unit,
     onError: (String) -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+    val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER; implementationMode = PreviewView.ImplementationMode.COMPATIBLE } }
     val capture = remember { ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build() }
     val executor = remember { Executors.newSingleThreadExecutor() }
     var liveAnalysis by remember { mutableStateOf(false) }
     var liveDescription by remember { mutableStateOf<String?>(null) }
+    var savedFrameCount by remember { mutableIntStateOf(File(context.filesDir, "milo_camera_history").listFiles()?.count { it.isFile } ?: 0) }
+    var latestFrame by remember { mutableStateOf<String?>(null) }
     DisposableEffect(lifecycleOwner) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
         val listener = Runnable {
@@ -877,21 +831,42 @@ private fun CameraPanel(
         providerFuture.addListener(listener, ContextCompat.getMainExecutor(context))
         onDispose { try { providerFuture.get().unbindAll(); executor.shutdown() } catch (_: Exception) { } }
     }
-    LaunchedEffect(liveAnalysis) {
-        while (liveAnalysis) {
-            delay(5_000)
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000)
             val previewBitmap = previewView.bitmap
             val frame = previewBitmap?.let { bitmap ->
                 withContext(Dispatchers.Default) {
+                    val scaled = if (bitmap.width > 640) {
+                        Bitmap.createScaledBitmap(bitmap, 640, (bitmap.height * (640f / bitmap.width)).toInt().coerceAtLeast(1), true)
+                    } else bitmap
                     ByteArrayOutputStream().use { output ->
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 72, output)
+                        scaled.compress(Bitmap.CompressFormat.JPEG, 62, output)
+                        if (scaled !== bitmap) scaled.recycle()
                         Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
                     }
                 }
             }
-            if (frame == null) {
-                liveDescription = "Nie udało się pobrać klatki z podglądu."
-            } else {
+            if (frame != null) {
+                latestFrame = frame
+                try {
+                    savedFrameCount = withContext(Dispatchers.IO) {
+                        val frameDir = File(context.filesDir, "milo_camera_history").apply { mkdirs() }
+                        val saved = File(frameDir, "frame-${System.currentTimeMillis()}.jpg")
+                        saved.writeBytes(Base64.decode(frame, Base64.NO_WRAP))
+                        frameDir.listFiles()?.filter { it.isFile }?.sortedByDescending { it.lastModified() }
+                            ?.drop(300)?.forEach { it.delete() }
+                        frameDir.listFiles()?.count { it.isFile } ?: 0
+                    }
+                } catch (_: Exception) { }
+            }
+        }
+    }
+    LaunchedEffect(liveAnalysis) {
+        while (liveAnalysis) {
+            delay(5_000)
+            val frame = latestFrame
+            if (frame != null) {
                 liveDescription = "Milo analizuje obraz…"
                 try {
                     liveDescription = requestMilo(
@@ -907,15 +882,16 @@ private fun CameraPanel(
                 } catch (e: Exception) {
                     liveDescription = "Analiza chwilowo niedostępna: ${e.message ?: "brak odpowiedzi"}"
                 }
-            }
+            } else liveDescription = "Czekam na pierwszą zapisaną klatkę."
         }
     }
-    Column(Modifier.fillMaxWidth().background(Color(0xFF17363C)).padding(12.dp)) {
+    Column(modifier.background(Color(0xFF17363C)).padding(12.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("Podgląd jest lokalny. W trybie na żywo obraz trafia do ChatGPT co 5 s i zużywa limit planu.", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            Text("Klatki zapisywane co sekundę · zachowuję ostatnie 5 min. ${if (liveConversation) "Mikrofon jest aktywny." else "Mikrofon dostępny na dole."}", color = Color.White, fontSize = 12.sp, modifier = Modifier.weight(1f))
             TextButton(onClick = onClose) { Text("Zamknij", color = Color(0xFF9EE8D5)) }
         }
-        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxWidth().height(220.dp).clip(RoundedCornerShape(18.dp)))
+        AndroidView(factory = { previewView }, modifier = Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(18.dp)))
+        Text("Zapisane klatki: $savedFrameCount / 300", color = Color(0xFF9CC9C3), fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
         liveDescription?.let { result ->
             Text(result, color = Color.White, fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
         }
@@ -923,7 +899,7 @@ private fun CameraPanel(
             onClick = { liveAnalysis = !liveAnalysis },
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-        ) { Text(if (liveAnalysis) "Zatrzymaj analizę na żywo" else "Włącz analizę na żywo") }
+        ) { Text(if (liveAnalysis) "Zatrzymaj analizę AI · co 5 s" else "Włącz analizę AI · co 5 s") }
         Button(onClick = {
             val file = File.createTempFile("milo-camera-", ".jpg", context.cacheDir)
             val options = ImageCapture.OutputFileOptions.Builder(file).build()

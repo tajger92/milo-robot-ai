@@ -6,6 +6,8 @@ Milo to prywatnie instalowana aplikacja Android z polskim czatem AI, własną an
 
 Milo ma własną postać 3D: biały robot z niebieskim wizjerem, antenkami i świecącym emblematem. Na ekranie głównym delikatnie kołysze się nad miękką poświatą, mruga, zmienia oczy i usta, gdy słucha, mówi, myśli lub okazuje zaciekawienie. Ikona aplikacji pokazuje jego twarz. Małe funkcje są przypięte do dolnego paska, bez nagłówka z nazwą robota.
 
+Ekran nie wygasza się, gdy okno Milo jest widoczne. Po przejściu do innej aplikacji Android wraca do zwykłego limitu wygaszania.
+
 ## Rozmowa głosowa
 
 Milo domyślnie czyta odpowiedzi najlepszym dostępnym polskim głosem Androida. Ustawienia głosu można otworzyć z ⚙️. Przycisk głośnika wycisza lub włącza odczytywanie. Przycisk mikrofonu uruchamia rozmowę na żywo: Milo nasłuchuje, odpowiada głosem i ponownie nasłuchuje, aż zatrzymasz tryb przyciskiem stop. Mikrofon działa także w trybie kamery. Androidowa usługa rozpoznawania mowy może przetwarzać wypowiedź; do ChatGPT Milo wysyła rozpoznany tekst. Wymagana jest zgoda na mikrofon oraz polski głos zainstalowany na urządzeniu.

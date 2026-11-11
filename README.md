@@ -22,7 +22,7 @@ Milo trzyma pamięć i historię rozmów lokalnie na telefonie. Pamięć przekaz
 
 Podgląd działa tylko po naciśnięciu ikony aparatu. Podczas podglądu Milo zapisuje klatkę co sekundę do prywatnego katalogu aplikacji na telefonie i zachowuje najwyżej 300 ostatnich klatek (około 5 minut); starsze usuwa. Tryb analizy AI wysyła najnowszą klatkę do ChatGPT co 5 sekund, dopóki go nie zatrzymasz. Z mikrofonu można równocześnie rozmawiać z Milo. Obraz jest przesyłany do OpenAI tylko przy analizie AI albo wysłaniu zdjęcia; kamera nie działa w tle.
 
-Jeśli systemowy DNS nie znajduje hosta logowania, Milo ponawia zapytanie przez DNS-over-HTTPS, a następnie może spróbować publicznego DNS przez UDP. Połączenie TLS nadal weryfikuje certyfikat oryginalnego serwera. Jeśli sieć blokuje także zapasowe połączenia, sprawdź dostęp do internetu i filtry sieciowe.
+Jeśli systemowy DNS nie znajduje hosta logowania, Milo ponawia zapytanie przez DNS-over-HTTPS, łącząc się z resolverem po jego znanym adresie IP. Weryfikacja certyfikatu TLS i nazwy resolvera pozostaje włączona. Następnie Milo może spróbować publicznego DNS przez UDP. Jeśli sieć blokuje także zapasowe połączenia, sprawdź dostęp do internetu i filtry sieciowe.
 
 ## Budowanie APK
 

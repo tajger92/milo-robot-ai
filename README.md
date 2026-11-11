@@ -4,7 +4,7 @@ Milo to prywatnie instalowana aplikacja Android z polskim czatem AI, własną an
 
 ## Własna postać Milo
 
-Milo ma autorski, miętowy hełm z wizjerem, antenką i świecącymi oczami. Twarz delikatnie się porusza i mruga; źrenice, brwi i usta zmieniają wyraz, gdy Milo się cieszy, zastanawia albo patrzy przez kamerę. Animacje są narysowane w Compose i działają bez dodatkowych plików graficznych.
+Milo ma własną postać 3D: biały robot z niebieskim wizjerem, antenkami i świecącym emblematem. Na ekranie głównym delikatnie unosi się nad miękką poświatą; małe funkcje są przypięte do dolnego paska.
 
 ## Rozmowa głosowa
 
@@ -21,6 +21,8 @@ Milo trzyma pamięć i historię rozmów lokalnie na telefonie. Pamięć przekaz
 ## Kamera
 
 Podgląd działa tylko po naciśnięciu ikony aparatu. Podczas podglądu Milo zapisuje klatkę co sekundę do prywatnego katalogu aplikacji na telefonie i zachowuje najwyżej 300 ostatnich klatek (około 5 minut); starsze usuwa. Tryb analizy AI wysyła najnowszą klatkę do ChatGPT co 5 sekund, dopóki go nie zatrzymasz. Z mikrofonu można równocześnie rozmawiać z Milo. Obraz jest przesyłany do OpenAI tylko przy analizie AI albo wysłaniu zdjęcia; kamera nie działa w tle.
+
+Jeśli logowanie zgłasza brak adresu DNS dla `auth.openai.com`, sprawdź dostęp do internetu w telefonie, wyłącz VPN lub filtr DNS i ustaw Prywatny DNS na Automatyczny. Następnie wybierz „Spróbuj ponownie” w aplikacji.
 
 ## Budowanie APK
 

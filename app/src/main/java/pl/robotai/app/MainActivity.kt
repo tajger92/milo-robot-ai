@@ -708,7 +708,10 @@ private fun loginFailureMessage(error: Throwable): String {
     val dnsFailure = causeChain.any { it is UnknownHostException } ||
         causeChain.any { it.message?.contains("Unable to resolve host", ignoreCase = true) == true }
     return if (dnsFailure) {
-        "Brak odpowiedzi DNS dla auth.openai.com. Telefon nie może odnaleźć serwera logowania. Sprawdź internet, wyłącz VPN/bloker DNS lub ustaw Prywatny DNS na Automatyczny i spróbuj ponownie."
+        val detail = causeChain.firstNotNullOfOrNull { cause ->
+            cause.message?.takeIf { it.contains("DNS", ignoreCase = true) || it.contains("Unable to resolve host", ignoreCase = true) }
+        }
+        "Milo nie mógł odnaleźć serwera potrzebnego do logowania. Jeśli strona OpenAI otwiera się w przeglądarce, problem dotyczy połączenia aplikacji. Sprawdź aktualizację Milo i spróbuj ponownie. ${detail.orEmpty()}"
     } else "Logowanie nie powiodło się: ${error.message ?: "sprawdź połączenie i spróbuj ponownie"}"
 }
 

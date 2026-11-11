@@ -12,12 +12,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
-import java.io.ByteArrayOutputStream
-import java.io.DataOutputStream
 import java.io.IOException
 import java.io.InputStreamReader
-import java.net.DatagramPacket
-import java.net.DatagramSocket
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -290,7 +286,7 @@ internal object ChatGptPlanClient {
         connection.inputStream.bufferedReader().use { it.readText() }
     }
 
-    /** Retry only name-resolution failures, using public DNS over UDP; TLS still verifies the original hostname. */
+    /** Retry name-resolution failures using DNS-over-HTTPS with pinned resolver IPs; TLS verifies each hostname. */
     private fun <T> withDnsFallback(url: String, action: (HttpURLConnection) -> T): T {
         val parsed = URL(url)
         var firstFailure: Exception? = null
@@ -331,6 +327,14 @@ internal object ChatGptPlanClient {
         .any { it is java.net.UnknownHostException }
 
     private fun resolveWithPublicDns(host: String): List<InetAddress> {
+        // HTTPS DNS works on networks that block raw UDP/53, which is common on mobile and filtered Wi-Fi.
+        for ((dohHost, bootstrapIp) in listOf("cloudflare-dns.com" to "1.1.1.1", "dns.google" to "8.8.8.8")) {
+            try {
+                val answers = queryDohA(host, dohHost, bootstrapIp)
+                if (answers.isNotEmpty()) return answers
+            } catch (_: Exception) { }
+        }
+        // Keep a raw DNS fallback for networks that allow UDP/53 but block the DoH resolvers.
         for (resolver in listOf("1.1.1.1", "8.8.8.8")) {
             try {
                 val answers = queryDnsA(host, resolver)
@@ -340,10 +344,32 @@ internal object ChatGptPlanClient {
         return emptyList()
     }
 
+    private fun queryDohA(host: String, dohHost: String, bootstrapIp: String): List<InetAddress> {
+        val url = URL("https://$dohHost/dns-query?name=${enc(host)}&type=A")
+        val connection = url.openConnection() as HttpsURLConnection
+        connection.sslSocketFactory = HostDnsSocketFactory(dohHost, InetAddress.getByName(bootstrapIp))
+        connection.connectTimeout = 7_000
+        connection.readTimeout = 7_000
+        connection.setRequestProperty("Accept", "application/dns-json")
+        try {
+            if (connection.responseCode !in 200..299) return emptyList()
+            val json = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+            val answers = json.optJSONArray("Answer") ?: return emptyList()
+            return (0 until answers.length()).mapNotNull { index ->
+                val answer = answers.optJSONObject(index) ?: return@mapNotNull null
+                if (answer.optInt("type") != 1) return@mapNotNull null
+                val octets = answer.optString("data").split('.')
+                if (octets.size != 4 || octets.any { part -> part.toIntOrNull()?.let { it !in 0..255 } != false }) return@mapNotNull null
+                InetAddress.getByAddress(octets.map { it.toInt().toByte() }.toByteArray())
+            }.distinct()
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun queryDnsA(host: String, resolver: String): List<InetAddress> {
         val id = java.security.SecureRandom().nextInt(65_536)
-        val queryBuffer = ByteArrayOutputStream()
-        DataOutputStream(queryBuffer).use { out ->
+        val request = java.io.ByteArrayOutputStream().also { buffer -> java.io.DataOutputStream(buffer).use { out ->
             out.writeShort(id); out.writeShort(0x0100); out.writeShort(1)
             out.writeShort(0); out.writeShort(0); out.writeShort(0)
             host.split('.').forEach { label ->
@@ -352,13 +378,12 @@ internal object ChatGptPlanClient {
                 out.writeByte(bytes.size); out.write(bytes)
             }
             out.writeByte(0); out.writeShort(1); out.writeShort(1)
-        }
-        val request = queryBuffer.toByteArray()
-        DatagramSocket().use { socket ->
+        } }.toByteArray()
+        java.net.DatagramSocket().use { socket ->
             socket.soTimeout = 2_500
-            socket.send(DatagramPacket(request, request.size, InetSocketAddress(resolver, 53)))
+            socket.send(java.net.DatagramPacket(request, request.size, InetSocketAddress(resolver, 53)))
             val bytes = ByteArray(4096)
-            val packet = DatagramPacket(bytes, bytes.size)
+            val packet = java.net.DatagramPacket(bytes, bytes.size)
             socket.receive(packet)
             val data = packet.data.copyOf(packet.length)
             if (data.size < 12 || readU16(data, 0) != id || readU16(data, 6) == 0) return emptyList()

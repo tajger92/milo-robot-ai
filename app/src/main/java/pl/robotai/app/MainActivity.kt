@@ -11,6 +11,7 @@ import android.os.Looper
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Base64
+import android.view.WindowManager
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -288,6 +289,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
         unknownSourcesLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {

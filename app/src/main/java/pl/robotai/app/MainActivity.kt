@@ -36,6 +36,7 @@ import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -49,10 +50,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -77,6 +81,7 @@ import java.io.File
 import java.io.ByteArrayOutputStream
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
+import java.net.UnknownHostException
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.Executors
@@ -558,12 +563,8 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                     )
                 } else {
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            FriendlyRobotFace(
-                                Modifier.fillMaxWidth(.92f).aspectRatio(1f),
-                                mood = when { busy -> RobotMood.THINKING; voiceSpeaking -> RobotMood.SPEAKING; voiceListening -> RobotMood.LISTENING; else -> RobotMood.FRIENDLY }
-                            )
-                            Spacer(Modifier.height(10.dp))
+                        Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+                            MiloHero(Modifier.weight(1f).fillMaxWidth())
                             Text(
                                 when { busy -> "Milo myśli…"; voiceSpeaking -> "Milo mówi"; liveConversation && voiceListening -> "Milo słucha"; liveConversation -> "Rozmowa na żywo"; else -> "Cześć! Jestem Milo." },
                                 color = Teal, fontSize = 15.sp, fontWeight = FontWeight.Medium
@@ -608,7 +609,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                         items(messages) { message ->
                             val fromMilo = message.role == "assistant"
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = if (fromMilo) Arrangement.Start else Arrangement.End, verticalAlignment = Alignment.Bottom) {
-                                if (fromMilo) { FriendlyRobotFace(Modifier.size(30.dp), mood = if (busy) RobotMood.THINKING else RobotMood.FRIENDLY); Spacer(Modifier.width(7.dp)) }
+                                if (fromMilo) { Image(painterResource(R.drawable.milo_hero), contentDescription = "Milo", modifier = Modifier.size(34.dp), contentScale = ContentScale.Fit); Spacer(Modifier.width(7.dp)) }
                                 Text(message.text, modifier = Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(18.dp, 18.dp, if (fromMilo) 18.dp else 4.dp, if (fromMilo) 4.dp else 18.dp)).background(if (fromMilo) Color.White else SoftMint).padding(horizontal = 15.dp, vertical = 12.dp), color = Ink, fontSize = 15.sp, lineHeight = 21.sp)
                             }
                         }
@@ -659,6 +660,11 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                         else "Połączone konto: ${chatGptAccount?.email}\nModel: ${chatGptAccount?.model}\nZużycie Milo podlega limitom planu ChatGPT.",
                         fontSize = 14.sp
                     )
+                    notice?.let { Text(it, color = if (it.contains("DNS", true)) Color(0xFF9A4B31) else Color(0xFF526C71), fontSize = 13.sp) }
+                    if (notice?.contains("DNS", true) == true) TextButton(onClick = {
+                        try { context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
+                        catch (_: Exception) { notice = "Otwórz Ustawienia Androida → Sieć i internet." }
+                    }) { Text("Otwórz ustawienia sieci") }
                     if (connecting) Text("Oczekiwanie na logowanie w przeglądarce…", color = Teal)
                     TextButton(onClick = {
                         try { context.startActivity(Intent("com.android.settings.TTS_SETTINGS")) }
@@ -683,14 +689,15 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                         val activity = context as? android.app.Activity
                         if (activity == null) { notice = "Nie udało się otworzyć logowania."; return@TextButton }
                         connecting = true
+                        notice = null
                         scope.launch {
                             try {
                                 chatGptAccount = ChatGptPlanClient.authorize(activity)
                                 notice = "Milo połączył się z planem ChatGPT."
-                            } catch (e: Exception) { notice = "Logowanie nie powiodło się: ${e.message ?: "błąd"}" }
+                            } catch (e: Exception) { notice = loginFailureMessage(e) }
                             finally { connecting = false }
                         }
-                    }, enabled = !connecting) { Text(if (chatGptAccount == null) "Continue with ChatGPT" else "Połącz ponownie") }
+                    }, enabled = !connecting) { Text(if (notice?.contains("DNS", true) == true) "Spróbuj ponownie" else if (chatGptAccount == null) "Continue with ChatGPT" else "Połącz ponownie") }
                 }
             },
             dismissButton = { TextButton(onClick = { settingsDialog = false }) { Text("Gotowe") } }
@@ -698,6 +705,46 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     }
     LaunchedEffect(messages.size, busy) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex + if (busy) 1 else 0)
+    }
+}
+
+private fun loginFailureMessage(error: Throwable): String {
+    val causeChain = generateSequence(error) { it.cause }.toList()
+    val dnsFailure = causeChain.any { it is UnknownHostException } ||
+        causeChain.any { it.message?.contains("Unable to resolve host", ignoreCase = true) == true }
+    return if (dnsFailure) {
+        "Brak odpowiedzi DNS dla auth.openai.com. Telefon nie może odnaleźć serwera logowania. Sprawdź internet, wyłącz VPN/bloker DNS lub ustaw Prywatny DNS na Automatyczny i spróbuj ponownie."
+    } else "Logowanie nie powiodło się: ${error.message ?: "sprawdź połączenie i spróbuj ponownie"}"
+}
+
+@Composable
+private fun MiloHero(modifier: Modifier = Modifier) {
+    val motion = rememberInfiniteTransition(label = "Milo hero motion")
+    val bob by motion.animateFloat(
+        initialValue = -5f,
+        targetValue = 5f,
+        animationSpec = infiniteRepeatable(tween(2_700, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "Milo floating"
+    )
+    val glow by motion.animateFloat(
+        initialValue = .30f,
+        targetValue = .58f,
+        animationSpec = infiniteRepeatable(tween(2_200), RepeatMode.Reverse),
+        label = "Milo glow"
+    )
+    Box(modifier, contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.size(300.dp).background(
+                Brush.radialGradient(listOf(Color(0xFF8DE9DA).copy(alpha = glow), Color(0xFFE2F2ED).copy(alpha = .2f), Color.Transparent)),
+                CircleShape
+            )
+        )
+        Image(
+            painter = painterResource(R.drawable.milo_hero),
+            contentDescription = "Milo — przyjazny robot z niebieskim wizjerem",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(.98f).offset(y = bob.dp)
+        )
     }
 }
 

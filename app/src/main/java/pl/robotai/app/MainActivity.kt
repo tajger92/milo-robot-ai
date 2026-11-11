@@ -19,6 +19,13 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.keyframes
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -239,7 +246,14 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                 Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 20.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                FriendlyRobotFace(Modifier.size(54.dp))
+                FriendlyRobotFace(
+                    Modifier.size(58.dp),
+                    mood = when {
+                        busy -> RobotMood.THINKING
+                        cameraOpen || photoBase64 != null -> RobotMood.CURIOUS
+                        else -> RobotMood.FRIENDLY
+                    }
+                )
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Milo", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Ink)
@@ -296,7 +310,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                     val fromMilo = message.role == "assistant"
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (fromMilo) Arrangement.Start else Arrangement.End, verticalAlignment = Alignment.Bottom) {
                         if (fromMilo) {
-                            FriendlyRobotFace(Modifier.size(30.dp))
+                            FriendlyRobotFace(Modifier.size(30.dp), mood = if (busy) RobotMood.THINKING else RobotMood.FRIENDLY)
                             Spacer(Modifier.width(7.dp))
                         }
                         Text(
@@ -442,20 +456,86 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     }
 }
 
+private enum class RobotMood { FRIENDLY, THINKING, CURIOUS }
+
 @Composable
-private fun FriendlyRobotFace(modifier: Modifier = Modifier) {
-    Canvas(modifier) {
+private fun FriendlyRobotFace(modifier: Modifier = Modifier, mood: RobotMood = RobotMood.FRIENDLY) {
+    val motion = rememberInfiniteTransition(label = "Milo robot face")
+    val blink = motion.animateFloat(
+        initialValue = 1f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = keyframes {
+                durationMillis = 4_800
+                1f at 0
+                1f at 4_050
+                .08f at 4_110
+                .08f at 4_180
+                1f at 4_250
+                1f at 4_800
+            }
+        ),
+        label = "blink"
+    )
+    val bob by motion.animateFloat(
+        initialValue = -1.2f,
+        targetValue = 1.2f,
+        animationSpec = infiniteRepeatable(tween(2_400, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "idle bob"
+    )
+    Canvas(modifier.offset(y = bob.dp)) {
         val s = size.minDimension
-        val left = (size.width - s) / 2
-        val top = (size.height - s) / 2
-        drawRoundRect(Color(0xFFBFE9DE), topLeft = androidx.compose.ui.geometry.Offset(left, top), size = androidx.compose.ui.geometry.Size(s, s), cornerRadius = androidx.compose.ui.geometry.CornerRadius(s * .32f))
-        drawRoundRect(Color(0xFF1D4850), topLeft = androidx.compose.ui.geometry.Offset(left + s * .14f, top + s * .19f), size = androidx.compose.ui.geometry.Size(s * .72f, s * .60f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(s * .22f))
-        val eyeY = top + s * .43f
-        drawCircle(Color(0xFF8FF5DD), s * .055f, androidx.compose.ui.geometry.Offset(left + s * .36f, eyeY))
-        drawCircle(Color(0xFF8FF5DD), s * .055f, androidx.compose.ui.geometry.Offset(left + s * .64f, eyeY))
-        drawArc(Color(0xFF8FF5DD), 15f, 150f, false, androidx.compose.ui.geometry.Offset(left + s * .34f, top + s * .48f), androidx.compose.ui.geometry.Size(s * .32f, s * .22f), style = Stroke(width = s * .035f, cap = StrokeCap.Round))
-        drawLine(Color(0xFF1D4850), androidx.compose.ui.geometry.Offset(left + s * .5f, top + s * .10f), androidx.compose.ui.geometry.Offset(left + s * .5f, top + s * .19f), s * .035f, cap = StrokeCap.Round)
-        drawCircle(Color(0xFFFFB870), s * .055f, androidx.compose.ui.geometry.Offset(left + s * .5f, top + s * .08f))
+        val x = (size.width - s) / 2f
+        val y = (size.height - s) / 2f
+        fun p(px: Float, py: Float) = androidx.compose.ui.geometry.Offset(x + s * px, y + s * py)
+        fun faceSize(w: Float, h: Float) = androidx.compose.ui.geometry.Size(s * w, s * h)
+
+        // Milo's own rounded helmet, side audio pods, glass face and glowing antenna.
+        drawRoundRect(Color(0xFF93CFC1), topLeft = p(.04f, .28f), size = faceSize(.10f, .26f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(s * .09f))
+        drawRoundRect(Color(0xFF93CFC1), topLeft = p(.86f, .28f), size = faceSize(.10f, .26f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(s * .09f))
+        drawRoundRect(Color(0xFFBFE9DE), topLeft = p(.09f, .20f), size = faceSize(.82f, .62f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(s * .25f))
+        drawRoundRect(Color(0xFF78B9AA), topLeft = p(.09f, .20f), size = faceSize(.82f, .62f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(s * .25f), style = Stroke(s * .025f))
+        drawRoundRect(Color(0xFF173F48), topLeft = p(.16f, .30f), size = faceSize(.68f, .46f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(s * .18f))
+        drawLine(Color(0xFF5A938B), p(.50f, .20f), p(.50f, .10f), s * .035f, cap = StrokeCap.Round)
+        drawCircle(Color(0xFFFFB870), s * .065f, p(.50f, .085f))
+        drawCircle(Color(0xFFFFD39A), s * .026f, p(.48f, .065f))
+
+        val eyeColor = Color(0xFF8FF5DD)
+        val eyeY = when (mood) {
+            RobotMood.THINKING -> .445f
+            RobotMood.CURIOUS -> .425f
+            RobotMood.FRIENDLY -> .445f
+        }
+        val eyeHeight = when (mood) {
+            RobotMood.CURIOUS -> .115f
+            else -> .085f
+        } * blink.value
+        val gazeX = if (mood == RobotMood.THINKING) .018f else 0f
+        listOf(.35f, .65f).forEach { eyeX ->
+            drawOval(eyeColor, topLeft = p(eyeX - .065f, eyeY - eyeHeight / 2f), size = faceSize(.13f, eyeHeight))
+            if (mood != RobotMood.THINKING) drawCircle(Color.White.copy(alpha = .72f), s * .014f, p(eyeX - .018f, eyeY - eyeHeight * .10f))
+        }
+
+        val browColor = Color(0xFF8FF5DD)
+        if (mood == RobotMood.CURIOUS) {
+            drawLine(browColor, p(.25f, .345f), p(.39f, .315f), s * .025f, cap = StrokeCap.Round)
+            drawLine(browColor, p(.61f, .315f), p(.75f, .345f), s * .025f, cap = StrokeCap.Round)
+            drawOval(browColor, topLeft = p(.465f, .56f), size = faceSize(.07f, .07f))
+        } else if (mood == RobotMood.THINKING) {
+            drawLine(browColor.copy(alpha = .8f), p(.27f, .35f), p(.40f, .34f), s * .022f, cap = StrokeCap.Round)
+            drawLine(browColor.copy(alpha = .8f), p(.60f, .34f), p(.73f, .35f), s * .022f, cap = StrokeCap.Round)
+            drawArc(browColor, 205f, 130f, false, topLeft = p(.43f, .56f), size = faceSize(.14f, .07f), style = Stroke(width = s * .025f, cap = StrokeCap.Round))
+        } else {
+            drawArc(browColor.copy(alpha = .9f), 205f, 130f, false, topLeft = p(.245f, .335f), size = faceSize(.21f, .07f), style = Stroke(width = s * .022f, cap = StrokeCap.Round))
+            drawArc(browColor.copy(alpha = .9f), 205f, 130f, false, topLeft = p(.545f, .335f), size = faceSize(.21f, .07f), style = Stroke(width = s * .022f, cap = StrokeCap.Round))
+            drawArc(browColor, 20f, 140f, false, topLeft = p(.37f, .535f), size = faceSize(.26f, .16f), style = Stroke(width = s * .032f, cap = StrokeCap.Round))
+        }
+        if (mood == RobotMood.THINKING) {
+            drawCircle(Color(0xFFFFB870).copy(alpha = .8f), s * .018f, p(.79f, .55f))
+        } else {
+            drawCircle(Color(0xFFFF9F9A).copy(alpha = .45f), s * .034f, p(.245f, .53f))
+            drawCircle(Color(0xFFFF9F9A).copy(alpha = .45f), s * .034f, p(.755f, .53f))
+        }
     }
 }
 

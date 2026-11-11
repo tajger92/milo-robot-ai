@@ -12,9 +12,17 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
+import java.io.IOException
 import java.io.InputStreamReader
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -27,6 +35,10 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SNIHostName
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import java.math.BigInteger
 import java.util.UUID
 
@@ -229,8 +241,8 @@ internal object ChatGptPlanClient {
         val header = JSONObject(String(Base64.decode(parts[0], Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8))
         val claims = JSONObject(String(Base64.decode(parts[1], Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8))
         require(header.optString("alg") == "RS256") { "Nieobsługiwany podpis tokenu." }
-        val jwksUri = JSONObject(URL("$ISSUER/.well-known/openid-configuration").readText()).getString("jwks_uri")
-        val keys = JSONObject(URL(jwksUri).readText()).getJSONArray("keys")
+        val jwksUri = JSONObject(readText("$ISSUER/.well-known/openid-configuration")).getString("jwks_uri")
+        val keys = JSONObject(readText(jwksUri)).getJSONArray("keys")
         val key = (0 until keys.length()).map { keys.getJSONObject(it) }.firstOrNull { it.optString("kid") == header.optString("kid") }
             ?: error("Brak klucza do weryfikacji logowania.")
         val modulus = BigInteger(1, Base64.decode(key.getString("n"), Base64.URL_SAFE or Base64.NO_WRAP))
@@ -248,30 +260,167 @@ internal object ChatGptPlanClient {
     }
 
     private fun postForm(url: String, fields: Map<String, String>): JSONObject {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"; connectTimeout = 20_000; readTimeout = 30_000; doOutput = true
-            setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-        }
-        try {
+        return withDnsFallback(url) { connection ->
+            connection.requestMethod = "POST"; connection.connectTimeout = 20_000; connection.readTimeout = 30_000; connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
             val body = fields.entries.joinToString("&") { "${enc(it.key)}=${enc(it.value)}" }
             connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val code = connection.responseCode
             val text = (if (code in 200..299) connection.inputStream else connection.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (code !in 200..299) error("Logowanie ChatGPT HTTP $code: ${text.take(300)}")
-            return JSONObject(text)
-        } finally { connection.disconnect() }
+            JSONObject(text)
+        }
     }
 
     private fun getJson(url: String, bearer: String): JSONObject {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 20_000; readTimeout = 30_000; setRequestProperty("Authorization", "Bearer $bearer")
-        }
-        try {
+        return withDnsFallback(url) { connection ->
+            connection.connectTimeout = 20_000; connection.readTimeout = 30_000
+            connection.setRequestProperty("Authorization", "Bearer $bearer")
             val code = connection.responseCode
             val text = (if (code in 200..299) connection.inputStream else connection.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (code !in 200..299) error("OpenAI HTTP $code: ${text.take(300)}")
-            return JSONObject(text)
-        } finally { connection.disconnect() }
+            JSONObject(text)
+        }
+    }
+
+    private fun readText(url: String): String = withDnsFallback(url) { connection ->
+        connection.connectTimeout = 15_000; connection.readTimeout = 15_000
+        val code = connection.responseCode
+        if (code !in 200..299) error("OpenAI HTTP $code.")
+        connection.inputStream.bufferedReader().use { it.readText() }
+    }
+
+    /** Retry only name-resolution failures, using public DNS over UDP; TLS still verifies the original hostname. */
+    private fun <T> withDnsFallback(url: String, action: (HttpURLConnection) -> T): T {
+        val parsed = URL(url)
+        var firstFailure: Exception? = null
+        val systemConnection = parsed.openConnection() as HttpURLConnection
+        try {
+            return action(systemConnection)
+        } catch (e: Exception) {
+            if (!isUnknownHost(e)) throw e
+            firstFailure = e
+        } finally {
+            systemConnection.disconnect()
+        }
+
+        if (parsed.protocol != "https") throw firstFailure ?: IOException("Brak połączenia DNS.")
+        val addresses = resolveWithPublicDns(parsed.host)
+        if (addresses.isEmpty()) throw IOException(
+            "Systemowy DNS i zapasowy DNS nie znajdują ${parsed.host}. Sprawdź internet, Prywatny DNS lub VPN.",
+            firstFailure
+        )
+        var lastFailure: Exception = firstFailure ?: IOException("Nie udało się rozwiązać DNS.")
+        for (address in addresses) {
+            val connection = parsed.openConnection() as? HttpsURLConnection
+                ?: throw IOException("Nieobsługiwany protokół połączenia.")
+            try {
+                connection.sslSocketFactory = HostDnsSocketFactory(parsed.host, address)
+                return action(connection)
+            } catch (e: Exception) {
+                if (!isUnknownHost(e) && e !is IOException) throw e
+                lastFailure = e
+            } finally {
+                connection.disconnect()
+            }
+        }
+        throw IOException("Nie udało się połączyć z ${parsed.host} przez zapasowy DNS.", lastFailure)
+    }
+
+    private fun isUnknownHost(error: Throwable): Boolean = generateSequence(error) { it.cause }
+        .any { it is java.net.UnknownHostException }
+
+    private fun resolveWithPublicDns(host: String): List<InetAddress> {
+        for (resolver in listOf("1.1.1.1", "8.8.8.8")) {
+            try {
+                val answers = queryDnsA(host, resolver)
+                if (answers.isNotEmpty()) return answers
+            } catch (_: Exception) { }
+        }
+        return emptyList()
+    }
+
+    private fun queryDnsA(host: String, resolver: String): List<InetAddress> {
+        val id = java.security.SecureRandom().nextInt(65_536)
+        val queryBuffer = ByteArrayOutputStream()
+        DataOutputStream(queryBuffer).use { out ->
+            out.writeShort(id); out.writeShort(0x0100); out.writeShort(1)
+            out.writeShort(0); out.writeShort(0); out.writeShort(0)
+            host.split('.').forEach { label ->
+                val bytes = label.toByteArray(Charsets.US_ASCII)
+                require(bytes.isNotEmpty() && bytes.size <= 63)
+                out.writeByte(bytes.size); out.write(bytes)
+            }
+            out.writeByte(0); out.writeShort(1); out.writeShort(1)
+        }
+        val request = queryBuffer.toByteArray()
+        DatagramSocket().use { socket ->
+            socket.soTimeout = 2_500
+            socket.send(DatagramPacket(request, request.size, InetSocketAddress(resolver, 53)))
+            val bytes = ByteArray(4096)
+            val packet = DatagramPacket(bytes, bytes.size)
+            socket.receive(packet)
+            val data = packet.data.copyOf(packet.length)
+            if (data.size < 12 || readU16(data, 0) != id || readU16(data, 6) == 0) return emptyList()
+            var offset = 12
+            repeat(readU16(data, 4)) {
+                offset = skipDnsName(data, offset) + 4
+                require(offset <= data.size)
+            }
+            val count = readU16(data, 6)
+            val result = mutableListOf<InetAddress>()
+            repeat(count) {
+                offset = skipDnsName(data, offset)
+                require(offset + 10 <= data.size)
+                val type = readU16(data, offset)
+                val dataLength = readU16(data, offset + 8)
+                val dataOffset = offset + 10
+                require(dataOffset + dataLength <= data.size)
+                if (type == 1 && dataLength == 4) result.add(InetAddress.getByAddress(data.copyOfRange(dataOffset, dataOffset + 4)))
+                offset = dataOffset + dataLength
+            }
+            return result.distinct()
+        }
+    }
+
+    private fun readU16(data: ByteArray, offset: Int) = ((data[offset].toInt() and 0xff) shl 8) or (data[offset + 1].toInt() and 0xff)
+
+    private fun skipDnsName(data: ByteArray, start: Int): Int {
+        var offset = start
+        while (offset < data.size) {
+            val length = data[offset].toInt() and 0xff
+            if (length == 0) return offset + 1
+            if ((length and 0xc0) == 0xc0) return offset + 2
+            offset += length + 1
+        }
+        throw IOException("Nieprawidłowa odpowiedź DNS.")
+    }
+
+    private class HostDnsSocketFactory(private val host: String, private val address: InetAddress) : SSLSocketFactory() {
+        private val delegate = SSLSocketFactory.getDefault() as SSLSocketFactory
+        override fun getDefaultCipherSuites() = delegate.defaultCipherSuites
+        override fun getSupportedCipherSuites() = delegate.supportedCipherSuites
+        override fun createSocket(host: String, port: Int): Socket = connect(host, port, null, 0)
+        override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket = connect(host, port, localHost, localPort)
+        override fun createSocket(host: InetAddress, port: Int): Socket = connect(this.host, port, null, 0)
+        override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket = connect(host, port, localAddress, localPort)
+        override fun createSocket(socket: Socket, host: String, port: Int, autoClose: Boolean): Socket {
+            if (!socket.isConnected) socket.connect(InetSocketAddress(address, port), 15_000)
+            val ssl = delegate.createSocket(socket, host, port, autoClose) as SSLSocket
+            ssl.sslParameters = ssl.sslParameters.apply {
+                endpointIdentificationAlgorithm = "HTTPS"
+                serverNames = listOf(SNIHostName(host))
+            }
+            return ssl
+        }
+        override fun createSocket(): Socket = delegate.createSocket()
+
+        private fun connect(hostName: String, port: Int, localHost: InetAddress?, localPort: Int): Socket {
+            val raw = Socket()
+            if (localHost != null) raw.bind(InetSocketAddress(localHost, localPort))
+            raw.connect(InetSocketAddress(address, port), 15_000)
+            return createSocket(raw, hostName, port, true)
+        }
     }
 
     private fun randomUrlToken(bytes: Int) = Base64.encodeToString(ByteArray(bytes).also { java.security.SecureRandom().nextBytes(it) }, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)

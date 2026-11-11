@@ -50,6 +50,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -536,16 +537,6 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     MaterialTheme(colorScheme = lightColorScheme(primary = Teal, background = Cream, surface = Color.White, onSurface = Ink)) {
         Box(Modifier.fillMaxSize().background(Cream)) {
             Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Milo", fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Ink)
-                        Text(if (chatGptAccount != null) "Twój przyjazny robot · gotowy" else "Twój przyjazny robot", fontSize = 13.sp, color = Color(0xFF698087))
-                    }
-                    TextButton(onClick = {
-                        chatGptAccount = ChatGptPlanClient.currentAccount(context)
-                        settingsDialog = true
-                    }) { Text("⚙️", fontSize = 21.sp) }
-                }
                 updateMessage?.let { status ->
                     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(SoftMint).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(status, color = Ink, fontSize = 12.sp, modifier = Modifier.weight(1f))
@@ -564,9 +555,12 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                 } else {
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-                            MiloHero(Modifier.weight(1f).fillMaxWidth())
+                            MiloHero(
+                                Modifier.weight(1f).fillMaxWidth(),
+                                mood = when { busy -> RobotMood.THINKING; voiceSpeaking -> RobotMood.SPEAKING; voiceListening -> RobotMood.LISTENING; else -> RobotMood.FRIENDLY }
+                            )
                             Text(
-                                when { busy -> "Milo myśli…"; voiceSpeaking -> "Milo mówi"; liveConversation && voiceListening -> "Milo słucha"; liveConversation -> "Rozmowa na żywo"; else -> "Cześć! Jestem Milo." },
+                                when { busy -> "Myślę…"; voiceSpeaking -> "Mówię"; liveConversation && voiceListening -> "Słucham"; liveConversation -> "Nasłuchuję"; else -> "Gotowy" },
                                 color = Teal, fontSize = 15.sp, fontWeight = FontWeight.Medium
                             )
                             if (notice != null) Text(notice.orEmpty(), color = Color(0xFF698087), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp), maxLines = 2)
@@ -591,6 +585,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                     ) { Text(if (liveConversation) "⏹" else "🎙️", fontSize = 22.sp) }
                     FilledTonalButton(onClick = { voiceEnabled = !voiceEnabled; context.getSharedPreferences(PREFS, 0).edit().putBoolean(VOICE_ENABLED_KEY, voiceEnabled).apply(); if (!voiceEnabled) { voiceController?.stopSpeaking(); voiceController?.resumeAfterResponse() } }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(50.dp)) { Text(if (voiceEnabled) "🔊" else "🔇", fontSize = 19.sp) }
                     FilledTonalButton(onClick = { memoryDialog = true }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(50.dp)) { Text("🧠", fontSize = 20.sp) }
+                    FilledTonalButton(onClick = { chatGptAccount = ChatGptPlanClient.currentAccount(context); settingsDialog = true }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(50.dp)) { Text("⚙️", fontSize = 20.sp) }
                 }
             }
         }
@@ -718,7 +713,7 @@ private fun loginFailureMessage(error: Throwable): String {
 }
 
 @Composable
-private fun MiloHero(modifier: Modifier = Modifier) {
+private fun MiloHero(modifier: Modifier = Modifier, mood: RobotMood = RobotMood.FRIENDLY) {
     val motion = rememberInfiniteTransition(label = "Milo hero motion")
     val bob by motion.animateFloat(
         initialValue = -5f,
@@ -732,6 +727,32 @@ private fun MiloHero(modifier: Modifier = Modifier) {
         animationSpec = infiniteRepeatable(tween(2_200), RepeatMode.Reverse),
         label = "Milo glow"
     )
+    val blink by motion.animateFloat(
+        initialValue = 1f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(animation = keyframes {
+            durationMillis = 4_600
+            1f at 0
+            1f at 3_950
+            .04f at 4_015
+            .04f at 4_095
+            1f at 4_180
+            1f at 4_600
+        }),
+        label = "Milo blink"
+    )
+    val talkingMouth by motion.animateFloat(
+        initialValue = .012f,
+        targetValue = .052f,
+        animationSpec = infiniteRepeatable(tween(240, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "Milo talking mouth"
+    )
+    val sway by motion.animateFloat(
+        initialValue = -1.15f,
+        targetValue = 1.15f,
+        animationSpec = infiniteRepeatable(tween(3_100, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "Milo body sway"
+    )
     Box(modifier, contentAlignment = Alignment.Center) {
         Box(
             Modifier.size(300.dp).background(
@@ -739,12 +760,51 @@ private fun MiloHero(modifier: Modifier = Modifier) {
                 CircleShape
             )
         )
-        Image(
-            painter = painterResource(R.drawable.milo_hero),
-            contentDescription = "Milo — przyjazny robot z niebieskim wizjerem",
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.fillMaxWidth().fillMaxHeight(.98f).offset(y = bob.dp)
-        )
+        Box(Modifier.fillMaxHeight(.98f).aspectRatio(.721f).offset(y = bob.dp).rotate(sway + when (mood) { RobotMood.CURIOUS -> -1.8f; RobotMood.THINKING -> 1.2f; else -> 0f }), contentAlignment = Alignment.Center) {
+            Image(
+                painter = painterResource(R.drawable.milo_hero_blankface),
+                contentDescription = "Przyjazny biały robot z niebieskim wizjerem",
+                contentScale = ContentScale.FillBounds,
+                modifier = Modifier.fillMaxSize()
+            )
+            Canvas(Modifier.fillMaxSize()) {
+                val w = size.width
+                val h = size.height
+                val face = Color(0xFF82F4FF)
+                val highlight = Color(0xFFE7FFFF)
+                val eyeY = when (mood) { RobotMood.THINKING -> .285f; RobotMood.CURIOUS -> .278f; else -> .292f }
+                val eyeScale = if (mood == RobotMood.CURIOUS) 1.16f else 1f
+                val eyeHeight = .047f * blink * if (mood == RobotMood.LISTENING) 1.22f else 1f
+                val eyeWidth = .118f * eyeScale
+                val gaze = if (mood == RobotMood.THINKING) .012f else 0f
+                listOf(.402f, .628f).forEach { x ->
+                    val centerX = (x + gaze) * w
+                    val centerY = eyeY * h
+                    if (mood == RobotMood.SPEAKING || mood == RobotMood.LISTENING) {
+                        drawOval(face, topLeft = androidx.compose.ui.geometry.Offset(centerX - eyeWidth * w / 2f, centerY - eyeHeight * h / 2f), size = androidx.compose.ui.geometry.Size(eyeWidth * w, eyeHeight * h))
+                        drawCircle(Color(0xFF075481), radius = w * .014f, center = androidx.compose.ui.geometry.Offset(centerX, centerY))
+                    } else if (mood == RobotMood.THINKING) {
+                        drawArc(face, startAngle = 195f, sweepAngle = 150f, useCenter = false, topLeft = androidx.compose.ui.geometry.Offset(centerX - eyeWidth * w / 2f, centerY - .018f * h), size = androidx.compose.ui.geometry.Size(eyeWidth * w, .042f * h), style = Stroke(width = w * .009f, cap = StrokeCap.Round))
+                    } else {
+                        drawRoundRect(face, topLeft = androidx.compose.ui.geometry.Offset(centerX - eyeWidth * w / 2f, centerY - eyeHeight * h / 2f), size = androidx.compose.ui.geometry.Size(eyeWidth * w, eyeHeight * h), cornerRadius = androidx.compose.ui.geometry.CornerRadius(w * .018f))
+                        drawCircle(highlight, radius = w * .009f, center = androidx.compose.ui.geometry.Offset(centerX - w * .018f, centerY - h * .008f))
+                    }
+                }
+                when (mood) {
+                    RobotMood.CURIOUS -> {
+                        drawArc(face, 190f, 155f, false, androidx.compose.ui.geometry.Offset(.355f * w, .252f * h), androidx.compose.ui.geometry.Size(.095f * w, .035f * h), style = Stroke(w * .009f, cap = StrokeCap.Round))
+                        drawOval(face, topLeft = androidx.compose.ui.geometry.Offset(.478f * w, .337f * h), size = androidx.compose.ui.geometry.Size(.052f * w, .048f * h))
+                    }
+                    RobotMood.THINKING -> {
+                        drawLine(face.copy(alpha = .8f), androidx.compose.ui.geometry.Offset(.38f * w, .253f * h), androidx.compose.ui.geometry.Offset(.45f * w, .26f * h), w * .008f, cap = StrokeCap.Round)
+                        drawArc(face, 205f, 130f, false, androidx.compose.ui.geometry.Offset(.47f * w, .34f * h), androidx.compose.ui.geometry.Size(.07f * w, .03f * h), style = Stroke(w * .007f, cap = StrokeCap.Round))
+                    }
+                    RobotMood.SPEAKING -> drawOval(face, topLeft = androidx.compose.ui.geometry.Offset(.474f * w, .339f * h), size = androidx.compose.ui.geometry.Size(.058f * w, talkingMouth * h))
+                    RobotMood.LISTENING -> drawArc(face, 20f, 140f, false, androidx.compose.ui.geometry.Offset(.465f * w, .337f * h), androidx.compose.ui.geometry.Size(.07f * w, .04f * h), style = Stroke(w * .008f, cap = StrokeCap.Round))
+                    RobotMood.FRIENDLY -> drawArc(face, 20f, 140f, false, androidx.compose.ui.geometry.Offset(.451f * w, .329f * h), androidx.compose.ui.geometry.Size(.105f * w, .058f * h), style = Stroke(w * .009f, cap = StrokeCap.Round))
+                }
+            }
+        }
     }
 }
 

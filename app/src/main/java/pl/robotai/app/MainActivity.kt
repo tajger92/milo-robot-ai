@@ -87,6 +87,7 @@ import java.net.UnknownHostException
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 import java.util.Locale
 
 private val Ink = Color(0xFF18333A)
@@ -94,7 +95,7 @@ private val Teal = Color(0xFF2EAAA0)
 private val Cream = Color(0xFFF5F3EC)
 private val SoftMint = Color(0xFFE2F2ED)
 
-data class ChatMessage(val role: String, val text: String)
+data class ChatMessage(val role: String, val text: String, val createdAt: Long = System.currentTimeMillis())
 
 private class MiloVoiceController(
     context: Context,
@@ -113,6 +114,7 @@ private class MiloVoiceController(
     private var liveConversation = false
     private var pendingSpeech: String? = null
     private var utteranceNumber = 0
+    private var finalUtteranceId: String? = null
 
     private val retryListening = Runnable { startListening() }
 
@@ -162,10 +164,11 @@ private class MiloVoiceController(
             engine.voices
                 ?.filter { it.locale.language == "pl" }
                 ?.maxWithOrNull(compareBy<Voice> { it.quality }
-                    .thenBy { if (it.isNetworkConnectionRequired) 1 else 0 })
+                    .thenBy { if (it.isNetworkConnectionRequired) 1 else 0 }
+                    .thenBy { if (it.locale.country == "PL") 1 else 0 })
                 ?.let(engine::setVoice)
-            engine.setPitch(.98f)
-            engine.setSpeechRate(.98f)
+            engine.setPitch(1.02f)
+            engine.setSpeechRate(.94f)
             ttsReady = polishAvailable
             ttsInitializationFinished = true
             mainHandler.post {
@@ -183,14 +186,14 @@ private class MiloVoiceController(
             override fun onDone(utteranceId: String?) {
                 mainHandler.post {
                     onSpeakingChanged(false)
-                    if (liveConversation) scheduleListeningRetry(450L)
+                    if (liveConversation && utteranceId == finalUtteranceId) scheduleListeningRetry(450L)
                 }
             }
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
                 mainHandler.post {
                     onSpeakingChanged(false)
-                    if (liveConversation) scheduleListeningRetry(450L)
+                    if (liveConversation && utteranceId == finalUtteranceId) scheduleListeningRetry(450L)
                 }
             }
         })
@@ -241,10 +244,49 @@ private class MiloVoiceController(
     private fun speakNow(text: String): Boolean {
         val engine = tts ?: return false
         pauseForResponse()
-        val utteranceId = "milo-${++utteranceNumber}"
-        val status = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
-        if (status != TextToSpeech.SUCCESS) return false
+        val parts = prepareSpeech(text)
+        if (parts.isEmpty()) return true
+        val number = ++utteranceNumber
+        finalUtteranceId = "milo-$number-${parts.lastIndex}"
+        parts.forEachIndexed { index, part ->
+            if (index > 0) engine.playSilentUtterance(part.pauseBeforeMillis, TextToSpeech.QUEUE_ADD, "milo-$number-pause-$index")
+            val status = engine.speak(
+                part.text,
+                if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+                null,
+                "milo-$number-$index"
+            )
+            if (status != TextToSpeech.SUCCESS) return false
+        }
         return true
+    }
+
+    private data class SpeechPart(val text: String, val pauseBeforeMillis: Long)
+
+    /** Remove markup and spoken punctuation while preserving pauses between clauses and sentences. */
+    private fun prepareSpeech(raw: String): List<SpeechPart> {
+        val readable = raw
+            .replace(Regex("(?s)```.*?```"), " ")
+            .replace(Regex("https?://\\S+"), " ")
+            .replace(Regex("\\[([^\\]]+)]\\([^)]+\\)"), "$1")
+            .replace(Regex("(?m)^\\s*(?:[-*•]|\\d+[.)])\\s+"), " ")
+            .replace(Regex("\\*{1,3}([^*]+)\\*{1,3}"), "$1")
+        val pattern = Regex("([^,.!?;:\\n…]+)([,;:.!?…\\n]*)")
+        return pattern.findAll(readable).mapNotNull { match ->
+            val spoken = match.groupValues[1]
+                .replace(Regex("[\\p{P}\\p{S}]+"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (spoken.isBlank()) return@mapNotNull null
+            val boundary = match.groupValues[2]
+            val pause = when {
+                boundary.any { it == '.' || it == '!' || it == '?' || it == '…' || it == '\n' } -> 230L
+                boundary.any { it in ";:" } -> 150L
+                boundary.isNotEmpty() -> 90L
+                else -> 0L
+            }
+            SpeechPart(spoken, pause)
+        }.toList()
     }
 
     private fun startListening() {
@@ -447,6 +489,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
             if (isEmpty()) add(ChatMessage("assistant", "Cześć! Jestem Milo. Możemy luźno pogadać — także na głos przyciskiem 🎙️ — poszukać czegoś w sieci albo pokazać mi coś przez kamerę. 🙂"))
         }
     }
+    val liveContext = remember { mutableStateListOf<ChatMessage>() }
     val memories = remember { mutableStateListOf<String>().apply { addAll(loadMemories(context)) } }
     var draft by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -466,6 +509,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     var voiceController by remember { mutableStateOf<MiloVoiceController?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val latestCameraFrame = remember { AtomicReference<String?>(null) }
     val latestVoiceEnabled = rememberUpdatedState(voiceEnabled)
     val submitMessage: (String) -> Unit = { rawText ->
         val text = rawText.trim()
@@ -474,25 +518,35 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
             notice = null
             voiceController?.pauseForResponse()
             messages.add(ChatMessage("user", text))
+            pruneLiveContext(liveContext)
+            if (cameraOpen) liveContext.add(ChatMessage("user", text))
             rememberRequestedFact(text)?.let { fact ->
                 if (memories.none { it.equals(fact, ignoreCase = true) }) memories.add(fact)
             }
             saveMessages(context, messages)
             saveMemories(context, memories)
-            val image = photoBase64
+            // While camera preview is open, pair every typed or spoken turn with its latest frame.
+            val image = photoBase64 ?: if (cameraOpen) latestCameraFrame.get() else null
             photoBase64 = null
             busy = true
             scope.launch {
                 var answerToSpeak = ""
                 try {
-                    answerToSpeak = requestMilo(
-                        context, messages.dropLast(1), text, image, memories.joinToString("\n")
-                    )
+                    val history = if (cameraOpen) liveContext.dropLast(1).toList() else messages.dropLast(1)
+                    answerToSpeak = requestMilo(context, history, text, image, memories.joinToString("\n"))
                     messages.add(ChatMessage("assistant", answerToSpeak))
+                    if (cameraOpen) {
+                        liveContext.add(ChatMessage("assistant", answerToSpeak))
+                        pruneLiveContext(liveContext)
+                    }
                     saveMessages(context, messages)
                 } catch (e: Exception) {
                     answerToSpeak = "Nie udało mi się uzyskać odpowiedzi z ChatGPT. Sprawdź logowanie Milo i internet. Szczegóły: ${e.message ?: "brak odpowiedzi"}"
                     messages.add(ChatMessage("assistant", answerToSpeak))
+                    if (cameraOpen) {
+                        liveContext.add(ChatMessage("assistant", answerToSpeak))
+                        pruneLiveContext(liveContext)
+                    }
                     saveMessages(context, messages)
                 } finally {
                     busy = false
@@ -524,7 +578,8 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         cameraAllowed = granted
-        if (granted) cameraOpen = true else notice = "Bez zgody na kamerę nie mogę zobaczyć zdjęcia. Możesz ją włączyć w ustawieniach aplikacji."
+        if (granted) { latestCameraFrame.set(null); cameraOpen = true }
+        else notice = "Bez zgody na kamerę nie mogę zobaczyć zdjęcia. Możesz ją włączyć w ustawieniach aplikacji."
     }
     val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
@@ -537,7 +592,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     }
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Teal, background = Cream, surface = Color.White, onSurface = Ink)) {
-        Box(Modifier.fillMaxSize().background(Cream)) {
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFFF8F7F2), Color(0xFFEAF5F1), Color(0xFFF3F1EA))))) {
             Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 updateMessage?.let { status ->
                     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(SoftMint).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -549,9 +604,33 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                     CameraPanel(
                         memory = memories.joinToString("\n"),
                         liveConversation = liveConversation,
+                        latestFrameTarget = latestCameraFrame,
                         modifier = Modifier.weight(1f).fillMaxWidth(),
-                        onCapture = { encoded -> photoBase64 = encoded; cameraOpen = false; chatOpen = true; notice = "Zdjęcie gotowe. Napisz, co mam na nim sprawdzić." },
-                        onClose = { cameraOpen = false },
+                        onCapture = { encoded -> photoBase64 = encoded; latestCameraFrame.set(null); cameraOpen = false; chatOpen = true; notice = "Zdjęcie gotowe. Napisz, co mam na nim sprawdzić." },
+                        onSaveImportant = {
+                            pruneLiveContext(liveContext)
+                            if (liveContext.isEmpty()) notice = "W tej godzinie nie ma jeszcze rozmowy do zapisania."
+                            else scope.launch {
+                                notice = "Milo wybiera ważne szczegóły z rozmowy…"
+                                try {
+                                    val extracted = requestMilo(
+                                        context,
+                                        liveContext.toList(),
+                                        "Wypisz po polsku maksymalnie 5 krótkich, trwałych i przydatnych faktów do lokalnej pamięci Milo, wynikających WYŁĄCZNIE z tej rozmowy. Zachowuj preferencje, ważne ustalenia, trwające zadania i powtarzające się problemy. Pomiń dane wrażliwe, chwilowe szczegóły oraz przypuszczenia. Nie dopowiadaj. Zwróć same fakty, każdy w osobnym wierszu, bez wstępu. Jeśli nie ma nic wartego zapamiętania, zwróć dokładnie: BRAK",
+                                        null,
+                                        memories.joinToString("\n"),
+                                        webSearch = false
+                                    )
+                                    val facts = extracted.lineSequence().map { it.trim().removePrefix("•").removePrefix("-").trim() }
+                                        .filter { it.length >= 4 && !it.equals("BRAK", true) }
+                                        .take(5).toList()
+                                    facts.forEach { fact -> if (memories.none { it.equals(fact, true) }) memories.add(fact) }
+                                    saveMemories(context, memories)
+                                    notice = if (facts.isEmpty()) "Nie znalazłem trwałych szczegółów do zapisania." else "Zapisano ${facts.size} ważne informacje w lokalnej pamięci Milo."
+                                } catch (e: Exception) { notice = "Nie udało się zapisać szczegółów: ${e.message ?: "brak odpowiedzi"}" }
+                            }
+                        },
+                        onClose = { latestCameraFrame.set(null); cameraOpen = false; liveContext.clear() },
                         onError = { notice = it }
                     )
                 } else {
@@ -572,7 +651,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                 }
                 Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                     FilledTonalButton(onClick = { chatOpen = true }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(50.dp)) { Text("💬", fontSize = 21.sp) }
-                    FilledTonalButton(onClick = { notice = null; if (cameraAllowed) cameraOpen = true else permission.launch(Manifest.permission.CAMERA) }, shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(50.dp)) { Text("📷", fontSize = 20.sp) }
+                    FilledTonalButton(onClick = { notice = null; latestCameraFrame.set(null); liveContext.clear(); if (cameraAllowed) cameraOpen = true else permission.launch(Manifest.permission.CAMERA) }, shape = RoundedCornerShape(20.dp), contentPadding = PaddingValues(horizontal = 15.dp), modifier = Modifier.height(50.dp)) { Text("Live", fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
                     FilledTonalButton(
                         onClick = {
                             if (liveConversation) { voiceController?.stopLiveConversation(); liveConversation = false; notice = "Zakończono rozmowę na żywo." }
@@ -916,8 +995,10 @@ private fun FriendlyRobotFace(modifier: Modifier = Modifier, mood: RobotMood = R
 private fun CameraPanel(
     memory: String,
     liveConversation: Boolean,
+    latestFrameTarget: AtomicReference<String?>,
     modifier: Modifier = Modifier,
     onCapture: (String) -> Unit,
+    onSaveImportant: () -> Unit,
     onClose: () -> Unit,
     onError: (String) -> Unit
 ) {
@@ -926,26 +1007,43 @@ private fun CameraPanel(
     val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER; implementationMode = PreviewView.ImplementationMode.COMPATIBLE } }
     val capture = remember { ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build() }
     val executor = remember { Executors.newSingleThreadExecutor() }
+    var useFrontCamera by remember { mutableStateOf(false) }
+    var cameraEnabled by remember { mutableStateOf(true) }
     var liveAnalysis by remember { mutableStateOf(false) }
     var liveDescription by remember { mutableStateOf<String?>(null) }
     var savedFrameCount by remember { mutableIntStateOf(File(context.filesDir, "milo_camera_history").listFiles()?.count { it.isFile } ?: 0) }
     var latestFrame by remember { mutableStateOf<String?>(null) }
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner, useFrontCamera, cameraEnabled) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
         val listener = Runnable {
             try {
                 val provider = providerFuture.get()
+                if (!cameraEnabled) {
+                    provider.unbindAll()
+                    latestFrame = null
+                    latestFrameTarget.set(null)
+                    return@Runnable
+                }
                 val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
+                val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+                if (!provider.hasCamera(selector)) {
+                    onError(if (useFrontCamera) "W tym urządzeniu nie ma przedniej kamery." else "W tym urządzeniu nie ma tylnej kamery.")
+                    return@Runnable
+                }
                 provider.unbindAll()
-                provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture)
+                provider.bindToLifecycle(lifecycleOwner, selector, preview, capture)
             } catch (e: Exception) { onError("Nie udało się uruchomić kamery: ${e.message}") }
         }
         providerFuture.addListener(listener, ContextCompat.getMainExecutor(context))
-        onDispose { try { providerFuture.get().unbindAll(); executor.shutdown() } catch (_: Exception) { } }
+        onDispose { try { if (providerFuture.isDone) providerFuture.get().unbindAll() } catch (_: Exception) { } }
     }
-    LaunchedEffect(Unit) {
+    DisposableEffect(executor) {
+        onDispose { executor.shutdown() }
+    }
+    LaunchedEffect(cameraEnabled) {
         while (true) {
             delay(1_000)
+            if (!cameraEnabled) continue
             val previewBitmap = previewView.bitmap
             val frame = previewBitmap?.let { bitmap ->
                 withContext(Dispatchers.Default) {
@@ -961,6 +1059,7 @@ private fun CameraPanel(
             }
             if (frame != null) {
                 latestFrame = frame
+                latestFrameTarget.set(frame)
                 try {
                     savedFrameCount = withContext(Dispatchers.IO) {
                         val frameDir = File(context.filesDir, "milo_camera_history").apply { mkdirs() }
@@ -977,6 +1076,10 @@ private fun CameraPanel(
     LaunchedEffect(liveAnalysis) {
         while (liveAnalysis) {
             delay(5_000)
+            if (!cameraEnabled) {
+                liveDescription = "Kamera jest wyłączona. Włącz ją, aby Milo mógł analizować obraz."
+                continue
+            }
             val frame = latestFrame
             if (frame != null) {
                 liveDescription = "Milo analizuje obraz…"
@@ -984,7 +1087,7 @@ private fun CameraPanel(
                     liveDescription = requestMilo(
                         context,
                         emptyList(),
-                        "Opisz krótko, co widać teraz na obrazie. Jeśli są widoczne liczby, tekst lub dane, odczytaj je ostrożnie i zaznacz niepewność.",
+                        "Jesteś Milo w trybie Live. Odnoś się do aktualnego obrazu tylko wtedy, gdy pomaga to w rozmowie. Pomagaj diagnozować usterki i codzienne sytuacje: najpierw opisz obserwacje, potem możliwe przyczyny z poziomem niepewności i bezpieczne kolejne kroki. Przy elektryczności, gazie, pożarze, urazie lub ryzyku zatrucia postaw bezpieczeństwo na pierwszym miejscu i wskaż, kiedy przerwać oraz wezwać fachową pomoc. Nie udawaj pewności ani nie zgaduj nieczytelnych oznaczeń.",
                         frame,
                         memory,
                         webSearch = false
@@ -997,13 +1100,23 @@ private fun CameraPanel(
             } else liveDescription = "Czekam na pierwszą zapisaną klatkę."
         }
     }
-    Column(modifier.background(Color(0xFF17363C)).padding(12.dp)) {
+    Column(modifier.clip(RoundedCornerShape(30.dp)).background(Brush.linearGradient(listOf(Color(0xFF235A5B), Color(0xFF17363C), Color(0xFF263F61)))).padding(14.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("Klatki zapisywane co sekundę · zachowuję ostatnie 5 min. ${if (liveConversation) "Mikrofon jest aktywny." else "Mikrofon dostępny na dole."}", color = Color.White, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Text("Tryb Live · kontekst rozmowy do 1 godziny · ${if (liveConversation) "mikrofon aktywny" else "mikrofon dostępny na dole"}", color = Color.White, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            TextButton(onClick = {
+                cameraEnabled = !cameraEnabled
+                if (!cameraEnabled) { latestFrame = null; latestFrameTarget.set(null); liveDescription = "Kamera wyłączona. Rozmowa Live nadal działa bez obrazu." }
+            }) { Text(if (cameraEnabled) "Wyłącz kamerę" else "Włącz kamerę", color = Color(0xFF9EE8D5)) }
+            TextButton(onClick = { useFrontCamera = !useFrontCamera }) {
+                Text(if (useFrontCamera) "Tylna" else "Przednia", color = Color(0xFF9EE8D5))
+            }
             TextButton(onClick = onClose) { Text("Zamknij", color = Color(0xFF9EE8D5)) }
         }
-        AndroidView(factory = { previewView }, modifier = Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(18.dp)))
-        Text("Zapisane klatki: $savedFrameCount / 300", color = Color(0xFF9CC9C3), fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+        Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(26.dp)).background(Color(0xFF102D34)), contentAlignment = Alignment.Center) {
+            if (cameraEnabled) AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+            else Text("Kamera wyłączona\nMilo nie otrzymuje teraz obrazu", color = Color.White, fontSize = 15.sp, lineHeight = 22.sp)
+        }
+        Text(if (cameraEnabled) "Klatki zapisywane co sekundę · do 5 minut historii" else "Nie zapisuję klatek, gdy kamera jest wyłączona", color = Color(0xFF9CC9C3), fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
         liveDescription?.let { result ->
             Text(result, color = Color.White, fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
         }
@@ -1012,6 +1125,7 @@ private fun CameraPanel(
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
         ) { Text(if (liveAnalysis) "Zatrzymaj analizę AI · co 5 s" else "Włącz analizę AI · co 5 s") }
+        OutlinedButton(onClick = onSaveImportant, modifier = Modifier.fillMaxWidth().padding(top = 6.dp), shape = RoundedCornerShape(22.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)) { Text("Zapisz ważne szczegóły rozmowy") }
         Button(onClick = {
             val file = File.createTempFile("milo-camera-", ".jpg", context.cacheDir)
             val options = ImageCapture.OutputFileOptions.Builder(file).build()
@@ -1056,7 +1170,7 @@ private fun loadMessages(context: android.content.Context): List<ChatMessage> = 
     val json = JSONArray(context.getSharedPreferences(PREFS, 0).getString(MESSAGES_KEY, "[]"))
     (0 until json.length()).map { index ->
         val item = json.getJSONObject(index)
-        ChatMessage(item.getString("role"), item.getString("text"))
+        ChatMessage(item.getString("role"), item.getString("text"), item.optLong("createdAt", System.currentTimeMillis()))
     }
 } catch (_: Exception) { emptyList() }
 
@@ -1067,7 +1181,7 @@ private fun loadMemories(context: android.content.Context): List<String> = try {
 
 private fun saveMessages(context: android.content.Context, messages: List<ChatMessage>) {
     val json = JSONArray()
-    messages.takeLast(200).forEach { json.put(JSONObject().put("role", it.role).put("text", it.text)) }
+    messages.takeLast(200).forEach { json.put(JSONObject().put("role", it.role).put("text", it.text).put("createdAt", it.createdAt)) }
     context.getSharedPreferences(PREFS, 0).edit().putString(MESSAGES_KEY, json.toString()).apply()
 }
 
@@ -1077,7 +1191,17 @@ private fun saveMemories(context: android.content.Context, memories: List<String
     context.getSharedPreferences(PREFS, 0).edit().putString(MEMORIES_KEY, json.toString()).apply()
 }
 
+private fun pruneLiveContext(context: MutableList<ChatMessage>) {
+    val cutoff = System.currentTimeMillis() - 60L * 60L * 1000L
+    context.removeAll { it.createdAt < cutoff }
+}
+
 private fun rememberRequestedFact(text: String): String? {
-    val match = Regex("(?i)^\\s*(?:milo[, ]+)?zapamiętaj(?:, że| że|:)?\\s*(.+)$").find(text) ?: return null
-    return match.groupValues[1].trim().takeIf { it.length >= 3 }?.take(300)
+    val fact = Regex("(?i)^\\s*(?:(?:milo[, ]+)?(?:proszę\\s+)?(?:zapamiętaj|zapisz\\s+w\\s+pamięci)|warto\\s+zapamiętać)(?:\\s*,?\\s*(?:że|:)?\\s*)(.+)$")
+        .find(text)?.groupValues?.get(1)?.trim()?.takeIf { it.length >= 3 }?.take(300)
+    if (fact != null) return fact
+    val introduction = Regex("(?i)^\\s*(?:(?:cześć|dzień dobry)[,! ]+)?(?:mam na imię|nazywam się)\\s+([\\p{L}][\\p{L}'’\\-]{1,39})(?:[\\s,.!?]|$)").find(text)
+        ?: return null
+    val name = introduction.groupValues[1].replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale("pl", "PL")) else it.toString() }
+    return "Rozmówca przedstawił się jako $name."
 }

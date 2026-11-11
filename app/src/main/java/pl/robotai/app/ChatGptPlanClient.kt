@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -345,15 +346,27 @@ internal object ChatGptPlanClient {
     }
 
     private fun queryDohA(host: String, dohHost: String, bootstrapIp: String): List<InetAddress> {
-        val url = URL("https://$dohHost/dns-query?name=${enc(host)}&type=A")
-        val connection = url.openConnection() as HttpsURLConnection
-        connection.sslSocketFactory = HostDnsSocketFactory(dohHost, InetAddress.getByName(bootstrapIp))
-        connection.connectTimeout = 7_000
-        connection.readTimeout = 7_000
-        connection.setRequestProperty("Accept", "application/dns-json")
+        // Avoid URLConnection's hostname lookup entirely: connect to the resolver's numeric IP,
+        // while retaining SNI and certificate/hostname verification for its HTTPS name.
+        val socket = HostDnsSocketFactory(dohHost, InetAddress.getByName(bootstrapIp))
+            .createSocket(dohHost, 443) as SSLSocket
+        socket.soTimeout = 7_000
         try {
-            if (connection.responseCode !in 200..299) return emptyList()
-            val json = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+            socket.startHandshake()
+            val path = "/dns-query?name=${enc(host)}&type=A"
+            val request = "GET $path HTTP/1.1\r\nHost: $dohHost\r\nAccept: application/dns-json\r\nConnection: close\r\n\r\n"
+            socket.outputStream.write(request.toByteArray(Charsets.US_ASCII))
+            val response = socket.inputStream.use { it.readBytes() }
+            val responseText = String(response, Charsets.ISO_8859_1)
+            val headerEnd = responseText.indexOf("\r\n\r\n")
+            if (headerEnd < 0) throw IOException("Niepełna odpowiedź DNS-over-HTTPS.")
+            val headers = responseText.substring(0, headerEnd)
+            val status = headers.lineSequence().firstOrNull()?.split(' ')?.getOrNull(1)?.toIntOrNull()
+            if (status == null || status !in 200..299) return emptyList()
+            val bodyOffset = headerEnd + 4
+            val bodyBytes = response.copyOfRange(bodyOffset, response.size)
+            val decodedBody = if (headers.contains("transfer-encoding: chunked", ignoreCase = true)) decodeChunkedBody(bodyBytes) else bodyBytes
+            val json = JSONObject(String(decodedBody, Charsets.UTF_8))
             val answers = json.optJSONArray("Answer") ?: return emptyList()
             return (0 until answers.length()).mapNotNull { index ->
                 val answer = answers.optJSONObject(index) ?: return@mapNotNull null
@@ -363,8 +376,26 @@ internal object ChatGptPlanClient {
                 InetAddress.getByAddress(octets.map { it.toInt().toByte() }.toByteArray())
             }.distinct()
         } finally {
-            connection.disconnect()
+            socket.close()
         }
+    }
+
+    private fun decodeChunkedBody(bytes: ByteArray): ByteArray {
+        val output = ByteArrayOutputStream()
+        var offset = 0
+        while (offset < bytes.size) {
+            var lineEnd = offset
+            while (lineEnd + 1 < bytes.size && !(bytes[lineEnd] == 13.toByte() && bytes[lineEnd + 1] == 10.toByte())) lineEnd++
+            if (lineEnd + 1 >= bytes.size) throw IOException("Niepełna odpowiedź DNS-over-HTTPS.")
+            val sizeText = String(bytes, offset, lineEnd - offset, Charsets.US_ASCII).substringBefore(';').trim()
+            val size = sizeText.toIntOrNull(16) ?: throw IOException("Nieprawidłowa odpowiedź DNS-over-HTTPS.")
+            offset = lineEnd + 2
+            if (size == 0) return output.toByteArray()
+            if (size < 0 || offset + size + 2 > bytes.size) throw IOException("Niepełna odpowiedź DNS-over-HTTPS.")
+            output.write(bytes, offset, size)
+            offset += size + 2
+        }
+        throw IOException("Niepełna odpowiedź DNS-over-HTTPS.")
     }
 
     private fun queryDnsA(host: String, resolver: String): List<InetAddress> {

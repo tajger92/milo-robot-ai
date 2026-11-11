@@ -1,0 +1,12 @@
+.gradle/
+local.properties
+*.iml
+.idea/
+build/
+.build-tools/
+backend/.venv/
+backend/.env
+backend/updates/*.apk
+Milo-debug.apk
+__pycache__/
+*.py[cod]

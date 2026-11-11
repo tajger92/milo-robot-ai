@@ -8,7 +8,7 @@ Milo ma autorski, miętowy hełm z wizjerem, antenką i świecącymi oczami. Twa
 
 ## Rozmowa głosowa
 
-Milo domyślnie czyta odpowiedzi polskim głosem Androida, ustawionym na spokojniejsze tempo i niższy ton. Przycisk głośnika wycisza lub włącza odczytywanie. Przycisk mikrofonu uruchamia rozmowę na żywo: Milo nasłuchuje, odpowiada głosem i ponownie nasłuchuje, aż zatrzymasz tryb przyciskiem stop. Androidowa usługa rozpoznawania mowy może przetwarzać wypowiedź; do ChatGPT Milo wysyła rozpoznany tekst. Wymagana jest zgoda na mikrofon oraz polski głos zainstalowany na urządzeniu.
+Milo domyślnie czyta odpowiedzi najlepszym dostępnym polskim głosem Androida. Ustawienia głosu można otworzyć z ⚙️. Przycisk głośnika wycisza lub włącza odczytywanie. Przycisk mikrofonu uruchamia rozmowę na żywo: Milo nasłuchuje, odpowiada głosem i ponownie nasłuchuje, aż zatrzymasz tryb przyciskiem stop. Mikrofon działa także w trybie kamery. Androidowa usługa rozpoznawania mowy może przetwarzać wypowiedź; do ChatGPT Milo wysyła rozpoznany tekst. Wymagana jest zgoda na mikrofon oraz polski głos zainstalowany na urządzeniu.
 
 ## AI przez plan ChatGPT
 
@@ -20,7 +20,7 @@ Milo trzyma pamięć i historię rozmów lokalnie na telefonie. Pamięć przekaz
 
 ## Kamera
 
-Podgląd działa tylko po naciśnięciu ikony aparatu. Zdjęcie trafia do AI po wysłaniu wiadomości. Tryb analizy na żywo wysyła kadr co 5 sekund, dopóki go nie zatrzymasz. Obraz jest przesyłany do OpenAI, dlatego używaj tego trybu świadomie. Kamera nie działa w tle.
+Podgląd działa tylko po naciśnięciu ikony aparatu. Podczas podglądu Milo zapisuje klatkę co sekundę do prywatnego katalogu aplikacji na telefonie i zachowuje najwyżej 300 ostatnich klatek (około 5 minut); starsze usuwa. Tryb analizy AI wysyła najnowszą klatkę do ChatGPT co 5 sekund, dopóki go nie zatrzymasz. Z mikrofonu można równocześnie rozmawiać z Milo. Obraz jest przesyłany do OpenAI tylko przy analizie AI albo wysłaniu zdjęcia; kamera nie działa w tle.
 
 ## Budowanie APK
 

@@ -513,7 +513,9 @@ private fun FriendlyRobotFace(modifier: Modifier = Modifier, mood: RobotMood = R
         val gazeX = if (mood == RobotMood.THINKING) .018f else 0f
         listOf(.35f, .65f).forEach { eyeX ->
             drawOval(eyeColor, topLeft = p(eyeX - .065f, eyeY - eyeHeight / 2f), size = faceSize(.13f, eyeHeight))
-            if (mood != RobotMood.THINKING) drawCircle(Color.White.copy(alpha = .72f), s * .014f, p(eyeX - .018f, eyeY - eyeHeight * .10f))
+            val pupilY = eyeY + if (mood == RobotMood.THINKING) -.012f else 0f
+            drawCircle(Color(0xFF173F48), s * .023f * blink.value, p(eyeX + gazeX, pupilY))
+            if (mood != RobotMood.THINKING) drawCircle(Color.White.copy(alpha = .82f), s * .012f * blink.value, p(eyeX + gazeX - .008f, pupilY - .009f))
         }
 
         val browColor = Color(0xFF8FF5DD)

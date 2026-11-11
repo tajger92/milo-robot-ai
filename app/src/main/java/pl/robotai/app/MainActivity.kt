@@ -2,12 +2,21 @@ package pl.robotai.app
 
 import android.Manifest
 import android.content.Intent
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Base64
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import androidx.activity.ComponentActivity
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -68,6 +77,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.Executors
+import java.util.Locale
 
 private val Ink = Color(0xFF18333A)
 private val Teal = Color(0xFF2EAAA0)
@@ -75,6 +85,191 @@ private val Cream = Color(0xFFF5F3EC)
 private val SoftMint = Color(0xFFE2F2ED)
 
 data class ChatMessage(val role: String, val text: String)
+
+private class MiloVoiceController(
+    context: Context,
+    private val onTranscript: (String) -> Unit,
+    private val onListeningChanged: (Boolean) -> Unit,
+    private val onSpeakingChanged: (Boolean) -> Unit,
+    private val onVoiceReady: (Boolean) -> Unit,
+    private val onError: (String) -> Unit
+) {
+    private val appContext = context.applicationContext
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var recognizer: SpeechRecognizer? = null
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var ttsInitializationFinished = false
+    private var liveConversation = false
+    private var pendingSpeech: String? = null
+    private var utteranceNumber = 0
+
+    private val retryListening = Runnable { startListening() }
+
+    init {
+        if (SpeechRecognizer.isRecognitionAvailable(appContext)) {
+            recognizer = SpeechRecognizer.createSpeechRecognizer(appContext).apply {
+                setRecognitionListener(object : RecognitionListener {
+                    override fun onReadyForSpeech(params: Bundle?) { onListeningChanged(true) }
+                    override fun onBeginningOfSpeech() { onListeningChanged(true) }
+                    override fun onRmsChanged(rmsdB: Float) = Unit
+                    override fun onBufferReceived(buffer: ByteArray?) = Unit
+                    override fun onEndOfSpeech() { onListeningChanged(false) }
+                    override fun onError(error: Int) {
+                        onListeningChanged(false)
+                        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                            liveConversation = false
+                            onError("Android nie udostępnił mikrofonu Milo.")
+                        } else if (liveConversation) {
+                            if (error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                                onError("Nasłuchiwanie zostało przerwane. Milo spróbuje ponownie.")
+                            }
+                            scheduleListeningRetry(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1_000L else 650L)
+                        }
+                    }
+                    override fun onResults(results: Bundle?) {
+                        onListeningChanged(false)
+                        val words = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
+                        if (liveConversation && !words.isNullOrBlank()) onTranscript(words)
+                        else if (liveConversation) scheduleListeningRetry(350L)
+                    }
+                    override fun onPartialResults(partialResults: Bundle?) = Unit
+                    override fun onEvent(eventType: Int, params: Bundle?) = Unit
+                })
+            }
+        }
+
+        tts = TextToSpeech(appContext) { status ->
+            val engine = tts ?: return@TextToSpeech
+            if (status != TextToSpeech.SUCCESS) {
+                ttsInitializationFinished = true
+                mainHandler.post { onVoiceReady(false) }
+                return@TextToSpeech
+            }
+            val languageStatus = engine.setLanguage(Locale("pl", "PL"))
+            val polishAvailable = languageStatus != TextToSpeech.LANG_MISSING_DATA &&
+                languageStatus != TextToSpeech.LANG_NOT_SUPPORTED
+            engine.voices
+                ?.filter { it.locale.language == "pl" }
+                ?.maxWithOrNull(compareBy<Voice> { if (it.quality >= Voice.QUALITY_HIGH) 1 else 0 }
+                    .thenBy { if (!it.isNetworkConnectionRequired) 1 else 0 })
+                ?.let(engine::setVoice)
+            engine.setPitch(.94f)
+            engine.setSpeechRate(.91f)
+            ttsReady = polishAvailable
+            ttsInitializationFinished = true
+            mainHandler.post {
+                onVoiceReady(polishAvailable)
+                val queued = pendingSpeech
+                pendingSpeech = null
+                if (queued != null && polishAvailable) speakNow(queued)
+                else if (liveConversation) scheduleListeningRetry(250L)
+            }
+        }
+        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {
+                mainHandler.post { onSpeakingChanged(true) }
+            }
+            override fun onDone(utteranceId: String?) {
+                mainHandler.post {
+                    onSpeakingChanged(false)
+                    if (liveConversation) scheduleListeningRetry(450L)
+                }
+            }
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                mainHandler.post {
+                    onSpeakingChanged(false)
+                    if (liveConversation) scheduleListeningRetry(450L)
+                }
+            }
+        })
+    }
+
+    fun startLiveConversation(): Boolean {
+        if (recognizer == null) {
+            onError("Na tym urządzeniu nie ma usługi rozpoznawania mowy.")
+            return false
+        }
+        liveConversation = true
+        startListening()
+        return true
+    }
+
+    fun stopLiveConversation() {
+        liveConversation = false
+        mainHandler.removeCallbacks(retryListening)
+        try { recognizer?.cancel() } catch (_: Exception) { }
+        onListeningChanged(false)
+    }
+
+    fun pauseForResponse() {
+        mainHandler.removeCallbacks(retryListening)
+        try { recognizer?.cancel() } catch (_: Exception) { }
+        onListeningChanged(false)
+    }
+
+    fun resumeAfterResponse() {
+        if (liveConversation) scheduleListeningRetry(300L)
+    }
+
+    fun stopSpeaking() {
+        try { tts?.stop() } catch (_: Exception) { }
+        onSpeakingChanged(false)
+    }
+
+    fun speak(text: String): Boolean {
+        if (!ttsReady) {
+            if (ttsInitializationFinished) return false
+            pendingSpeech = text
+            pauseForResponse()
+            return true
+        }
+        return speakNow(text)
+    }
+
+    private fun speakNow(text: String): Boolean {
+        val engine = tts ?: return false
+        pauseForResponse()
+        val utteranceId = "milo-${++utteranceNumber}"
+        val status = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+        if (status != TextToSpeech.SUCCESS) return false
+        return true
+    }
+
+    private fun startListening() {
+        if (!liveConversation) return
+        val service = recognizer ?: return
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pl-PL")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "pl-PL")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Milo słucha. Powiedz coś po polsku.")
+        }
+        try {
+            service.startListening(intent)
+        } catch (_: Exception) {
+            onListeningChanged(false)
+            scheduleListeningRetry(1_000L)
+        }
+    }
+
+    private fun scheduleListeningRetry(delayMillis: Long) {
+        if (!liveConversation) return
+        mainHandler.removeCallbacks(retryListening)
+        mainHandler.postDelayed(retryListening, delayMillis)
+    }
+
+    fun shutdown() {
+        stopLiveConversation()
+        try { recognizer?.destroy() } catch (_: Exception) { }
+        try { tts?.stop(); tts?.shutdown() } catch (_: Exception) { }
+        recognizer = null
+        tts = null
+    }
+}
 
 class MainActivity : ComponentActivity() {
     private val updateMessage = mutableStateOf<String?>(null)
@@ -222,7 +417,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     val messages = remember {
         mutableStateListOf<ChatMessage>().apply {
             addAll(loadMessages(context))
-            if (isEmpty()) add(ChatMessage("assistant", "Cześć! Jestem Milo. Możemy pogadać, poszukać czegoś w sieci albo pokazać mi coś przez kamerę. 🙂"))
+            if (isEmpty()) add(ChatMessage("assistant", "Cześć! Jestem Milo. Możemy luźno pogadać — także na głos przyciskiem 🎙️ — poszukać czegoś w sieci albo pokazać mi coś przez kamerę. 🙂"))
         }
     }
     val memories = remember { mutableStateListOf<String>().apply { addAll(loadMemories(context)) } }
@@ -233,11 +428,84 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     var photoBase64 by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var memoryDialog by remember { mutableStateOf(false) }
+    var voiceEnabled by remember {
+        mutableStateOf(context.getSharedPreferences(PREFS, 0).getBoolean(VOICE_ENABLED_KEY, true))
+    }
+    var voiceReady by remember { mutableStateOf(false) }
+    var liveConversation by remember { mutableStateOf(false) }
+    var voiceListening by remember { mutableStateOf(false) }
+    var voiceSpeaking by remember { mutableStateOf(false) }
+    var voiceController by remember { mutableStateOf<MiloVoiceController?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val latestVoiceEnabled = rememberUpdatedState(voiceEnabled)
+    val submitMessage: (String) -> Unit = { rawText ->
+        val text = rawText.trim()
+        if (text.isNotEmpty() && !busy) {
+            draft = ""
+            notice = null
+            voiceController?.pauseForResponse()
+            messages.add(ChatMessage("user", text))
+            rememberRequestedFact(text)?.let { fact ->
+                if (memories.none { it.equals(fact, ignoreCase = true) }) memories.add(fact)
+            }
+            saveMessages(context, messages)
+            saveMemories(context, memories)
+            val image = photoBase64
+            photoBase64 = null
+            busy = true
+            scope.launch {
+                var answerToSpeak = ""
+                try {
+                    answerToSpeak = requestMilo(
+                        context, messages.dropLast(1), text, image, memories.joinToString("\n")
+                    )
+                    messages.add(ChatMessage("assistant", answerToSpeak))
+                    saveMessages(context, messages)
+                } catch (e: Exception) {
+                    answerToSpeak = "Nie udało mi się uzyskać odpowiedzi z ChatGPT. Sprawdź logowanie Milo i internet. Szczegóły: ${e.message ?: "brak odpowiedzi"}"
+                    messages.add(ChatMessage("assistant", answerToSpeak))
+                    saveMessages(context, messages)
+                } finally {
+                    busy = false
+                    val spoken = if (latestVoiceEnabled.value) voiceController?.speak(answerToSpeak) == true else false
+                    if (!spoken) voiceController?.resumeAfterResponse()
+                }
+            }
+        }
+    }
+    val latestSubmitMessage = rememberUpdatedState(submitMessage)
+    DisposableEffect(context) {
+        val controller = MiloVoiceController(
+            context = context,
+            onTranscript = { words -> latestSubmitMessage.value(words) },
+            onListeningChanged = { voiceListening = it },
+            onSpeakingChanged = { voiceSpeaking = it },
+            onVoiceReady = { ready ->
+                voiceReady = ready
+                if (!ready) notice = "Nie znaleziono polskiego głosu w Androidzie. Zainstaluj polski głos w ustawieniach syntezy mowy."
+            },
+            onError = { notice = it }
+        )
+        voiceController = controller
+        onDispose {
+            controller.shutdown()
+            voiceController = null
+            liveConversation = false
+        }
+    }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         cameraAllowed = granted
         if (granted) cameraOpen = true else notice = "Bez zgody na kamerę nie mogę zobaczyć zdjęcia. Możesz ją włączyć w ustawieniach aplikacji."
+    }
+    val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            liveConversation = voiceController?.startLiveConversation() == true
+            notice = if (liveConversation) "Rozmowa na żywo włączona. Android rozpoznaje mowę; Milo wysyła do ChatGPT rozpoznany tekst. Milo będzie słuchał, odpowiadał i znów słuchał." else "Nie udało się uruchomić rozmowy głosowej."
+        } else {
+            liveConversation = false
+            notice = "Aby rozmawiać na żywo, zezwól Milo na dostęp do mikrofonu."
+        }
     }
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Teal, background = Cream, surface = Color.White, onSurface = Ink)) {
@@ -250,6 +518,8 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                     Modifier.size(58.dp),
                     mood = when {
                         busy -> RobotMood.THINKING
+                        voiceSpeaking -> RobotMood.SPEAKING
+                        voiceListening -> RobotMood.LISTENING
                         cameraOpen || photoBase64 != null -> RobotMood.CURIOUS
                         else -> RobotMood.FRIENDLY
                     }
@@ -270,6 +540,14 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                     }
                     context.startActivity(Intent.createChooser(share, "Przekaż rozmowę do aplikacji czatu"))
                 }) { Text("📤", fontSize = 19.sp) }
+                TextButton(onClick = {
+                    voiceEnabled = !voiceEnabled
+                    context.getSharedPreferences(PREFS, 0).edit().putBoolean(VOICE_ENABLED_KEY, voiceEnabled).apply()
+                    if (!voiceEnabled) {
+                        voiceController?.stopSpeaking()
+                        voiceController?.resumeAfterResponse()
+                    }
+                }) { Text(if (voiceEnabled) "🔊" else "🔇", fontSize = 18.sp) }
                 TextButton(onClick = { memoryDialog = true }) { Text("🧠", fontSize = 19.sp) }
                 TextButton(onClick = {
                     chatGptAccount = ChatGptPlanClient.currentAccount(context)
@@ -310,7 +588,14 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                     val fromMilo = message.role == "assistant"
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (fromMilo) Arrangement.Start else Arrangement.End, verticalAlignment = Alignment.Bottom) {
                         if (fromMilo) {
-                            FriendlyRobotFace(Modifier.size(30.dp), mood = if (busy) RobotMood.THINKING else RobotMood.FRIENDLY)
+                            FriendlyRobotFace(
+                                Modifier.size(30.dp),
+                                mood = when {
+                                    busy -> RobotMood.THINKING
+                                    voiceSpeaking -> RobotMood.SPEAKING
+                                    else -> RobotMood.FRIENDLY
+                                }
+                            )
                             Spacer(Modifier.width(7.dp))
                         }
                         Text(
@@ -333,6 +618,19 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                     TextButton(onClick = { photoBase64 = null; notice = "Usunięto zdjęcie z wiadomości." }) { Text("Usuń") }
                 }
             }
+            if (liveConversation) {
+                Text(
+                    when {
+                        busy -> "Milo układa odpowiedź…"
+                        voiceSpeaking -> "Milo mówi…"
+                        voiceListening -> "Milo słucha…"
+                        else -> "Rozmowa na żywo aktywna"
+                    },
+                    color = Teal,
+                    fontSize = 12.sp,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp)
+                )
+            }
             Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 FilledTonalButton(
                     onClick = {
@@ -341,6 +639,28 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                     },
                     shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(48.dp)
                 ) { Text("📷", fontSize = 20.sp) }
+                Spacer(Modifier.width(8.dp))
+                FilledTonalButton(
+                    onClick = {
+                        if (liveConversation) {
+                            voiceController?.stopLiveConversation()
+                            liveConversation = false
+                            notice = "Zakończono rozmowę na żywo."
+                        } else if (chatGptAccount == null) {
+                            notice = "Najpierw połącz Milo z ChatGPT w ustawieniach."
+                        } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                            liveConversation = voiceController?.startLiveConversation() == true
+                            notice = if (liveConversation) "Rozmowa na żywo włączona. Android rozpoznaje mowę; Milo wysyła do ChatGPT rozpoznany tekst. Milo będzie słuchał, odpowiadał i znów słuchał." else "Nie udało się uruchomić rozmowy głosowej."
+                        } else {
+                            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
+                    enabled = !busy || liveConversation,
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(0.dp),
+                    modifier = Modifier.size(48.dp),
+                    colors = if (liveConversation) ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFFF7D9D3)) else ButtonDefaults.filledTonalButtonColors()
+                ) { Text(if (liveConversation) "⏹" else "🎙️", fontSize = 19.sp) }
                 Spacer(Modifier.width(8.dp))
                 BasicTextField(
                     value = draft,
@@ -355,32 +675,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
                 Spacer(Modifier.width(8.dp))
                 Button(
                     enabled = draft.isNotBlank() && !busy,
-                    onClick = {
-                        val text = draft.trim()
-                        draft = ""
-                        notice = null
-                        messages.add(ChatMessage("user", text))
-                        rememberRequestedFact(text)?.let { fact ->
-                            if (memories.none { it.equals(fact, ignoreCase = true) }) memories.add(fact)
-                        }
-                        saveMessages(context, messages)
-                        saveMemories(context, memories)
-                        val image = photoBase64
-                        photoBase64 = null
-                        busy = true
-                        scope.launch {
-                            try {
-                                val answer = requestMilo(
-                                    context, messages.dropLast(1), text, image, memories.joinToString("\n")
-                                )
-                                messages.add(ChatMessage("assistant", answer))
-                                saveMessages(context, messages)
-                            } catch (e: Exception) {
-                                messages.add(ChatMessage("assistant", "Nie udało mi się uzyskać odpowiedzi z ChatGPT. Sprawdź logowanie Milo i internet. Szczegóły: ${e.message ?: "brak odpowiedzi"}"))
-                                saveMessages(context, messages)
-                            } finally { busy = false }
-                        }
-                    },
+                    onClick = { submitMessage(draft) },
                     shape = CircleShape, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(48.dp)
                 ) { Text("➤", fontSize = 18.sp) }
             }
@@ -456,7 +751,7 @@ private fun MiloApp(updateMessage: String?, onInstallUpdate: () -> Unit) {
     }
 }
 
-private enum class RobotMood { FRIENDLY, THINKING, CURIOUS }
+private enum class RobotMood { FRIENDLY, THINKING, CURIOUS, LISTENING, SPEAKING }
 
 @Composable
 private fun FriendlyRobotFace(modifier: Modifier = Modifier, mood: RobotMood = RobotMood.FRIENDLY) {
@@ -483,6 +778,12 @@ private fun FriendlyRobotFace(modifier: Modifier = Modifier, mood: RobotMood = R
         animationSpec = infiniteRepeatable(tween(2_400, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "idle bob"
     )
+    val mouthPulse by motion.animateFloat(
+        initialValue = .055f,
+        targetValue = .095f,
+        animationSpec = infiniteRepeatable(tween(260, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "speech mouth"
+    )
     Canvas(modifier.offset(y = bob.dp)) {
         val s = size.minDimension
         val x = (size.width - s) / 2f
@@ -504,10 +805,10 @@ private fun FriendlyRobotFace(modifier: Modifier = Modifier, mood: RobotMood = R
         val eyeY = when (mood) {
             RobotMood.THINKING -> .445f
             RobotMood.CURIOUS -> .425f
-            RobotMood.FRIENDLY -> .445f
+            RobotMood.LISTENING, RobotMood.SPEAKING, RobotMood.FRIENDLY -> .445f
         }
         val eyeHeight = when (mood) {
-            RobotMood.CURIOUS -> .115f
+            RobotMood.CURIOUS, RobotMood.LISTENING -> .115f
             else -> .085f
         } * blink.value
         val gazeX = if (mood == RobotMood.THINKING) .018f else 0f
@@ -523,10 +824,18 @@ private fun FriendlyRobotFace(modifier: Modifier = Modifier, mood: RobotMood = R
             drawLine(browColor, p(.25f, .345f), p(.39f, .315f), s * .025f, cap = StrokeCap.Round)
             drawLine(browColor, p(.61f, .315f), p(.75f, .345f), s * .025f, cap = StrokeCap.Round)
             drawOval(browColor, topLeft = p(.465f, .56f), size = faceSize(.07f, .07f))
+        } else if (mood == RobotMood.LISTENING) {
+            drawLine(browColor, p(.27f, .34f), p(.40f, .32f), s * .024f, cap = StrokeCap.Round)
+            drawLine(browColor, p(.60f, .32f), p(.73f, .34f), s * .024f, cap = StrokeCap.Round)
+            drawArc(browColor, 20f, 140f, false, topLeft = p(.40f, .545f), size = faceSize(.20f, .105f), style = Stroke(width = s * .028f, cap = StrokeCap.Round))
         } else if (mood == RobotMood.THINKING) {
             drawLine(browColor.copy(alpha = .8f), p(.27f, .35f), p(.40f, .34f), s * .022f, cap = StrokeCap.Round)
             drawLine(browColor.copy(alpha = .8f), p(.60f, .34f), p(.73f, .35f), s * .022f, cap = StrokeCap.Round)
             drawArc(browColor, 205f, 130f, false, topLeft = p(.43f, .56f), size = faceSize(.14f, .07f), style = Stroke(width = s * .025f, cap = StrokeCap.Round))
+        } else if (mood == RobotMood.SPEAKING) {
+            drawArc(browColor, 205f, 130f, false, topLeft = p(.27f, .33f), size = faceSize(.18f, .07f), style = Stroke(width = s * .022f, cap = StrokeCap.Round))
+            drawArc(browColor, 205f, 130f, false, topLeft = p(.55f, .33f), size = faceSize(.18f, .07f), style = Stroke(width = s * .022f, cap = StrokeCap.Round))
+            drawOval(browColor, topLeft = p(.5f - .07f, .555f), size = faceSize(.14f, mouthPulse))
         } else {
             drawArc(browColor.copy(alpha = .9f), 205f, 130f, false, topLeft = p(.245f, .335f), size = faceSize(.21f, .07f), style = Stroke(width = s * .022f, cap = StrokeCap.Round))
             drawArc(browColor.copy(alpha = .9f), 205f, 130f, false, topLeft = p(.545f, .335f), size = faceSize(.21f, .07f), style = Stroke(width = s * .022f, cap = StrokeCap.Round))
@@ -645,6 +954,7 @@ private suspend fun requestMilo(
 private const val PREFS = "milo_data"
 private const val MESSAGES_KEY = "messages"
 private const val MEMORIES_KEY = "memories"
+private const val VOICE_ENABLED_KEY = "voice_enabled"
 private const val SERVER_URL_KEY = "server_url"
 private const val SERVER_TOKEN_KEY = "server_token"
 

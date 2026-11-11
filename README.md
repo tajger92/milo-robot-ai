@@ -1,6 +1,10 @@
 # Milo — robot AI na Androida
 
-Milo to prywatnie instalowana aplikacja Android z polskim czatem AI, przyjazną twarzą, osobną pamięcią i kamerą uruchamianą przez użytkownika.
+Milo to prywatnie instalowana aplikacja Android z polskim czatem AI, własną animowaną twarzą robota, osobną pamięcią i kamerą uruchamianą przez użytkownika.
+
+## Własna postać Milo
+
+Milo ma autorski, miętowy hełm z wizjerem, antenką i świecącymi oczami. Twarz delikatnie się porusza i mruga; źrenice, brwi i usta zmieniają wyraz, gdy Milo się cieszy, zastanawia albo patrzy przez kamerę. Animacje są narysowane w Compose i działają bez dodatkowych plików graficznych.
 
 ## AI przez plan ChatGPT
 

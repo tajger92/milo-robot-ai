@@ -12,8 +12,8 @@ android {
         applicationId = "pl.robotai.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.6.0"
+        versionCode = 8
+        versionName = "0.8.0"
         buildConfigField("String", "BACKEND_URL", "\"http://10.0.2.2:8000\"")
     }
 
